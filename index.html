@@ -67,6 +67,12 @@ tr:last-child td { border-bottom: none; }
 .health-row .k { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .health-row .warnnote { color: var(--warn); }
 .empty { color: var(--faint); font-size: 13px; text-align: center; padding: 36px 0; }
+.dot-ok, .dot-bad { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 0; }
+.dot-ok { background: var(--green); }
+.dot-bad { background: var(--warn); }
+.api-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.api-row:last-child { border-bottom: none; }
+.api-row .num2 { font-variant-numeric: tabular-nums; font-weight: 600; }
 /* 登录 */
 .login { max-width: 420px; margin: 10vh auto 0; }
 .login h1 { font-size: 22px; font-weight: 600; margin: 26px 0 4px; }
@@ -129,6 +135,11 @@ tr:last-child td { border-bottom: none; }
         <span><span class="key" style="background:var(--llm)"></span>整理(大模型)</span>
       </div>
       <div class="tip" id="tip"></div>
+    </div>
+
+    <div class="section card">
+      <div class="eyebrow">upstream · <b>上游 API</b></div>
+      <div id="apis"></div>
     </div>
 
     <div class="section card">
@@ -268,6 +279,7 @@ tr:last-child td { border-bottom: none; }
       stat(o.month_requests, "本月请求", "识别 + 整理都算一次") +
       stat(o.active_today, "今日活跃", "墨尔本日界");
     drawChart(d.daily || []);
+    drawApis(d.apis || {}, o.month_micro || 0, d.daily || []);
     drawUsers(d.users || []);
     drawHealth(d.health || [], d.server_time, d.version);
   }
@@ -320,6 +332,49 @@ tr:last-child td { border-bottom: none; }
       tip.style.display = "block";
     });
     box.querySelector("svg").addEventListener("mouseleave", function () { tip.style.display = "none"; });
+  }
+
+  // 上游两家的活体状态。Soniox 行并排放两个口径:它家自报的本月成本 vs 我们账本的
+  // ASR 消耗 —— 失败请求不入它家日志,所以它 ≤ 我们的账是正常方向,反了才要查。
+  function drawApis(apis, monthMicro, daily) {
+    var el = document.getElementById("apis");
+    if (!el) return;
+    var html = "";
+    var ds = apis.deepseek || {};
+    var dsDot = ds.ok ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>';
+    var dsRight;
+    if (ds.ok && ds.balances) {
+      var parts = [];
+      ds.balances.forEach(function (b) {
+        if (Number(b.total) > 0 || b.currency === "CNY") {
+          parts.push((b.currency === "CNY" ? "¥" : "$") + b.total);
+        }
+      });
+      var cny = ds.balances.filter(function (b) { return b.currency === "CNY"; })[0];
+      var low = cny && Number(cny.total) < 5;
+      dsRight = '<span class="num2">余额 ' + esc(parts.join(" · ")) + "</span>" +
+        (low ? ' <span style="color:var(--warn)">· 快见底了,记得充</span>' : "");
+    } else {
+      dsRight = '<span style="color:var(--warn)">' + esc(ds.detail || "探测失败") + "</span>";
+    }
+    html += '<div class="api-row"><span>' + dsDot + "DeepSeek(整理 · 代付从这扣钱)</span>" +
+      '<span class="muted">' + dsRight + "</span></div>";
+
+    var sx = apis.soniox || {};
+    var sxDot = sx.ok ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>';
+    var sxRight;
+    if (sx.ok) {
+      // 我们账本的本月 ASR 消耗(日桶里 asr_micro 求和),和它家自报的并排
+      var ourAsr = 0;
+      daily.forEach(function (r) { ourAsr += (r.asr_micro || 0); });
+      sxRight = '<span class="num2">它家账 $' + Number(sx.month_cost_usd || 0).toFixed(4) + "</span>" +
+        ' <span class="muted">· 我们账 ' + usd(ourAsr) + "(30 天口径)</span>";
+    } else {
+      sxRight = '<span style="color:var(--warn)">' + esc(sx.detail || "探测失败") + "</span>";
+    }
+    html += '<div class="api-row"><span>' + sxDot + "Soniox(语音识别 · 通行证从这签)</span>" +
+      '<span class="muted">' + sxRight + "</span></div>";
+    el.innerHTML = html;
   }
 
   function drawUsers(users) {
