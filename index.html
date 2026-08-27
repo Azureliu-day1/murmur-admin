@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Murmur 后台</title>
+<style>
+:root {
+  --bg: #F7F7F8; --card: #FFFFFF; --ink: #1B1B1F; --second: #55555C;
+  --faint: #8E8E96; --line: #E9E9EC; --line2: #D6D6DC;
+  --coral: #E2531F; --coral-tint: #FBEFE9; --warn: #96570A; --warn-tint: #FAF2E0;
+  --green: #2E7D4F; --asr: #E2531F; --llm: #3667C9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161618; --card: #1E1E21; --ink: #F2F2F4; --second: #A0A0A8;
+    --faint: #6E6E76; --line: #2C2C31; --line2: #3A3A41;
+    --coral: #FF6B35; --coral-tint: #3A2118; --warn: #D9A441; --warn-tint: #2B2416;
+    --green: #5FBF87; --asr: #ED6234; --llm: #5583DB;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 14px/1.55 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 960px; margin: 0 auto; padding: 28px 20px 64px; }
+.brand { display: flex; align-items: center; gap: 9px; }
+.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); }
+.brand .name { font: 600 20px/1 Georgia, "Songti SC", serif; }
+.topbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 28px; }
+.topbar .who { color: var(--faint); font-size: 12px; display: flex; gap: 14px; align-items: baseline; }
+.topbar button { background: none; border: none; color: var(--second); font-size: 12px; cursor: pointer; }
+.topbar button:hover { color: var(--coral); }
+.eyebrow { font-size: 11px; letter-spacing: .5px; color: var(--faint); margin-bottom: 10px; }
+.eyebrow b { color: var(--second); font-weight: 500; }
+.grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+.stat .num { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+.stat .sub { font-size: 12px; color: var(--faint); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.section { margin-bottom: 24px; }
+.chart-box { position: relative; }
+.chart-svg { width: 100%; height: 180px; display: block; }
+.legend { display: flex; gap: 16px; font-size: 12px; color: var(--second); margin-top: 10px; }
+.legend .key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.tip {
+  position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
+  font-size: 12px; padding: 6px 10px; border-radius: 8px; white-space: nowrap;
+  transform: translate(-50%, -110%); display: none; font-variant-numeric: tabular-nums;
+}
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-size: 11px; letter-spacing: .5px; color: var(--faint); font-weight: 500;
+     padding: 4px 10px 8px; border-bottom: 1px solid var(--line); }
+td { padding: 10px; font-size: 13px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: none; }
+.chip { display: inline-block; font-size: 11px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line2); color: var(--second); }
+.chip.member { border-color: var(--coral); color: var(--coral); }
+.chip.blocked { border-color: var(--warn); color: var(--warn); background: var(--warn-tint); }
+.bar-track { width: 110px; height: 5px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 99px; background: var(--coral); min-width: 2px; }
+.bar-fill.hot { background: var(--warn); }
+.muted { color: var(--faint); }
+.health-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.health-row:last-child { border-bottom: none; }
+.health-row .k { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.health-row .warnnote { color: var(--warn); }
+.empty { color: var(--faint); font-size: 13px; text-align: center; padding: 36px 0; }
+/* 登录 */
+.login { max-width: 420px; margin: 10vh auto 0; }
+.login h1 { font-size: 22px; font-weight: 600; margin: 26px 0 4px; }
+.login .lead { color: var(--second); font-size: 13px; margin-bottom: 24px; }
+.login label { display: block; font-size: 12px; color: var(--second); margin: 0 0 4px; font-weight: 500; }
+.login input {
+  width: 100%; background: var(--bg); border: 1px solid var(--line2); border-radius: 8px;
+  padding: 9px 12px; font-size: 14px; color: var(--ink); outline: none; margin-bottom: 12px;
+}
+.login input:focus { border-color: var(--coral); }
+.login input.code { font: 600 22px/1.3 ui-monospace, Menlo, monospace; letter-spacing: 6px; }
+.login .go {
+  width: 100%; border: none; border-radius: 8px; padding: 10px; font-size: 13.5px; font-weight: 600;
+  background: var(--coral); color: #fff; cursor: pointer; margin-top: 4px;
+}
+.login .go:disabled { background: var(--line); color: var(--faint); cursor: default; }
+.login .alt { background: none; border: none; color: var(--second); font-size: 12px; cursor: pointer; margin-top: 14px; }
+.notice { color: var(--warn); font-size: 12.5px; margin-top: 12px; }
+.hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- 登录(未登录态) -->
+  <div id="login" class="login hidden">
+    <div class="brand"><div class="dot"></div><div class="name">Murmur</div></div>
+    <h1>后台</h1>
+    <p class="lead">只有管理员能看。填邮箱,给你发一封带验证码的信。</p>
+    <div id="step-email">
+      <label>邮箱</label>
+      <input id="email" type="email" placeholder="you@example.com" autocomplete="email">
+      <button id="send" class="go">发登录邮件</button>
+    </div>
+    <div id="step-code" class="hidden">
+      <label>验证码</label>
+      <input id="code" class="code" inputmode="numeric" placeholder="6 位数字" maxlength="6">
+      <label>或者,粘贴邮件里的链接</label>
+      <input id="link" type="text" placeholder="https://…verify?token=…">
+      <button id="verify" class="go">进入后台</button>
+      <button id="back" class="alt">换个邮箱</button>
+    </div>
+    <div id="login-notice" class="notice hidden"></div>
+  </div>
+
+  <!-- 仪表盘(登录态) -->
+  <div id="dash" class="hidden">
+    <div class="topbar">
+      <div class="brand"><div class="dot"></div><div class="name">Murmur</div>
+        <span style="color:var(--faint);font-size:12px;margin-left:6px">后台</span></div>
+      <div class="who"><span id="who"></span><button id="signout">退出</button></div>
+    </div>
+
+    <div class="grid4" id="stats"></div>
+
+    <div class="section card chart-box">
+      <div class="eyebrow">usage · <b>30 天用量(墨尔本日界)</b></div>
+      <div id="chart"></div>
+      <div class="legend">
+        <span><span class="key" style="background:var(--asr)"></span>识别(音频)</span>
+        <span><span class="key" style="background:var(--llm)"></span>整理(大模型)</span>
+      </div>
+      <div class="tip" id="tip"></div>
+    </div>
+
+    <div class="section card">
+      <div class="eyebrow">users · <b>内测名单</b></div>
+      <div id="users"></div>
+    </div>
+
+    <div class="section card">
+      <div class="eyebrow">health · <b>服务器健康</b></div>
+      <div id="health"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  // 页面住在 GitHub Pages(Supabase 免费档不让函数出 text/html,防钓鱼),
+  // API 和登录接口在 Supabase —— 跨域,靠函数侧的 CORS 头放行
+  var HOST = "https://syebvkwemxwxkonvsyjd.supabase.co";
+  var APIKEY = "sb_publishable_bBmuodbgO72q8CK_kacrSw_0o3cCsOd"; // 设计上可公开值,RLS 兜底
+  var SKEY = "murmur_admin_session";
+
+  var $ = function (id) { return document.getElementById(id); };
+  function show(el) { el.classList.remove("hidden"); }
+  function hide(el) { el.classList.add("hidden"); }
+  function notice(msg) { var n = $("login-notice"); n.textContent = msg; msg ? show(n) : hide(n); }
+
+  function session() { try { return JSON.parse(localStorage.getItem(SKEY) || "null"); } catch (e) { return null; } }
+  function saveSession(s) { try { localStorage.setItem(SKEY, JSON.stringify(s)); } catch (e) {} }
+  function clearSession() { try { localStorage.removeItem(SKEY); } catch (e) {} }
+
+  // ── 金额与时间 ──
+  function usd(micro) { return "$" + (micro / 1e6).toFixed(4); }
+  function ago(iso) {
+    if (!iso) return "—";
+    var s = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (s < 90) return "刚刚";
+    if (s < 5400) return Math.round(s / 60) + " 分钟前";
+    if (s < 129600) return Math.round(s / 3600) + " 小时前";
+    return Math.round(s / 86400) + " 天前";
+  }
+  function esc(t) { var d = document.createElement("div"); d.textContent = t == null ? "" : String(t); return d.innerHTML; }
+
+  // ── 登录(邮箱 + 6 位码;粘链接兜底)──
+  var pendingEmail = "";
+  $("send").onclick = function () {
+    var email = $("email").value.trim();
+    if (!email || email.indexOf("@") < 1) { notice("邮箱格式不对"); return; }
+    $("send").disabled = true; notice("");
+    fetch(HOST + "/auth/v1/otp", {
+      method: "POST",
+      headers: { apikey: APIKEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email, create_user: false })
+    }).then(function (r) {
+      $("send").disabled = false;
+      if (r.ok) { pendingEmail = email; hide($("step-email")); show($("step-code")); $("code").focus(); }
+      else { notice("如果这个邮箱在名单里,你会收到一封信。没收到就检查拼写。"); }
+    }).catch(function () { $("send").disabled = false; notice("网络没通,再试一次"); });
+  };
+  $("back").onclick = function () { show($("step-email")); hide($("step-code")); notice(""); };
+  $("verify").onclick = doVerify;
+  $("code").addEventListener("input", function () {
+    this.value = this.value.replace(/\D/g, "").slice(0, 6);
+    if (this.value.length === 6) doVerify();
+  });
+
+  function doVerify() {
+    var code = $("code").value.trim();
+    var link = $("link").value.trim();
+    notice("");
+    if (link) {
+      var m = link.match(/[?&](?:token_hash|token)=([^&\s]+)/);
+      if (!m) { notice("这不像一条登录链接 —— 整条复制过来"); return; }
+      verifyBody({ token_hash: m[1], type: "magiclink" }, []);
+    } else if (code.length === 6) {
+      // 新用户首封是 signup 模板 —— type 容错三值,写死一个会让第一次登录的人进不来
+      verifyBody({ email: pendingEmail, token: code, type: "email" },
+                 [{ email: pendingEmail, token: code, type: "magiclink" },
+                  { email: pendingEmail, token: code, type: "signup" }]);
+    } else { notice("填 6 位码,或把链接粘进来"); }
+  }
+  function verifyBody(body, fallbacks) {
+    fetch(HOST + "/auth/v1/verify", {
+      method: "POST",
+      headers: { apikey: APIKEY, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (res.ok && res.j.access_token) {
+          saveSession({ at: res.j.access_token, rt: res.j.refresh_token });
+          boot();
+        } else if (fallbacks.length) {
+          verifyBody(fallbacks[0], fallbacks.slice(1));
+        } else {
+          notice("码没对上(过期了就重发一封)");
+        }
+      }).catch(function () { notice("网络没通,再试一次"); });
+  }
+
+  $("signout").onclick = function () { clearSession(); location.reload(); };
+
+  // ── 拉数据(401 时静默刷新一次)──
+  function loadStats(retried) {
+    var s = session();
+    if (!s) { show($("login")); hide($("dash")); return; }
+    fetch(HOST + "/functions/v1/murmur/admin/stats", {
+      headers: { Authorization: "Bearer " + s.at }
+    }).then(function (r) {
+      if (r.status === 401 && !retried && s.rt) return refresh(s.rt).then(function (ok) {
+        if (ok) loadStats(true); else { clearSession(); show($("login")); hide($("dash")); }
+      });
+      if (r.status === 403) { clearSession(); show($("login")); hide($("dash")); notice("这个账号不是管理员"); return; }
+      if (!r.ok) { show($("login")); hide($("dash")); notice("服务器没接住(HTTP " + r.status + ")"); return; }
+      return r.json().then(render);
+    }).catch(function () { notice("网络没通"); });
+  }
+  function refresh(rt) {
+    return fetch(HOST + "/auth/v1/token?grant_type=refresh_token", {
+      method: "POST",
+      headers: { apikey: APIKEY, "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: rt })
+    }).then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (j.access_token) { saveSession({ at: j.access_token, rt: j.refresh_token }); return true; }
+        return false;
+      }).catch(function () { return false; });
+  }
+
+  // ── 渲染 ──
+  function render(d) {
+    hide($("login")); show($("dash"));
+    $("who").textContent = d.admin || "";
+    var o = d.overview || {};
+    $("stats").innerHTML =
+      stat(o.users, "用户", o.members + " member · " + o.free + " free" + (o.blocked ? " · " + o.blocked + " blocked" : "")) +
+      stat(usd(o.month_micro || 0), "本月总消耗", "服务器记账 · 含预扣回冲") +
+      stat(o.month_requests, "本月请求", "识别 + 整理都算一次") +
+      stat(o.active_today, "今日活跃", "墨尔本日界");
+    drawChart(d.daily || []);
+    drawUsers(d.users || []);
+    drawHealth(d.health || [], d.server_time, d.version);
+  }
+  function stat(num, label, sub) {
+    return '<div class="card stat"><div class="num">' + esc(num) + '</div>' +
+           '<div style="font-size:12.5px;color:var(--second);margin-top:4px">' + esc(label) + '</div>' +
+           '<div class="sub">' + esc(sub) + "</div></div>";
+  }
+
+  // 30 天堆叠柱。补齐没数据的日子(0 高),空月画空态。
+  function drawChart(daily) {
+    var box = $("chart");
+    if (!daily.length) { box.innerHTML = '<div class="empty">还没有用量 —— 第一句听写之后这里会长出柱子</div>'; return; }
+    var byDay = {}; daily.forEach(function (r) { byDay[r.day] = r; });
+    var days = [];
+    for (var i = 29; i >= 0; i--) {
+      var dt = new Date(Date.now() - i * 86400000);
+      var key = dt.toLocaleDateString("sv-SE", { timeZone: "Australia/Melbourne" }); // YYYY-MM-DD
+      days.push(byDay[key] || { day: key, asr_micro: 0, llm_micro: 0, total_micro: 0, requests: 0, active: 0 });
+    }
+    var max = Math.max.apply(null, days.map(function (r) { return r.total_micro || 0; }).concat([1]));
+    var W = 900, H = 180, PAD = 4, bw = (W - PAD * 2) / 30;
+    var svg = '<svg class="chart-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">';
+    // recessive 网格:只画一条中线
+    svg += '<line x1="0" y1="' + (H / 2) + '" x2="' + W + '" y2="' + (H / 2) + '" stroke="var(--line)" stroke-width="1"/>';
+    days.forEach(function (r, idx) {
+      var x = PAD + idx * bw + bw * 0.18, w = bw * 0.64;
+      var hA = (r.asr_micro || 0) / max * (H - 24);
+      var hL = (r.llm_micro || 0) / max * (H - 24);
+      var yL = H - 6 - hL, yA = yL - 2 - hA; // 段间 2px 露底
+      if (hL > 0.5) svg += '<rect x="' + x + '" y="' + yL + '" width="' + w + '" height="' + hL + '" fill="var(--llm)" rx="1.5"/>';
+      if (hA > 0.5) svg += '<rect x="' + x + '" y="' + yA + '" width="' + w + '" height="' + hA + '" fill="var(--asr)" rx="4"/>';
+      if (hA <= 0.5 && hL <= 0.5) svg += '<rect x="' + x + '" y="' + (H - 8) + '" width="' + w + '" height="2" fill="var(--line)" rx="1"/>';
+      // 命中区比柱子宽(交互规范:hit target ≥ mark)
+      svg += '<rect data-i="' + idx + '" x="' + (PAD + idx * bw) + '" y="0" width="' + bw + '" height="' + H + '" fill="transparent"/>';
+    });
+    svg += "</svg>";
+    box.innerHTML = svg;
+    var tip = $("tip");
+    box.querySelector("svg").addEventListener("mousemove", function (ev) {
+      var t = ev.target.getAttribute("data-i");
+      if (t == null) { tip.style.display = "none"; return; }
+      var r = days[+t];
+      var rect = box.getBoundingClientRect();
+      tip.innerHTML = esc(r.day.slice(5)) + " · " + usd(r.total_micro || 0) +
+        '<br>识别 ' + usd(r.asr_micro || 0) + " · 整理 " + usd(r.llm_micro || 0) +
+        "<br>" + (r.requests || 0) + " 次 · " + (r.active || 0) + " 人";
+      tip.style.left = (ev.clientX - rect.left) + "px";
+      tip.style.top = (ev.clientY - rect.top - 8) + "px";
+      tip.style.display = "block";
+    });
+    box.querySelector("svg").addEventListener("mouseleave", function () { tip.style.display = "none"; });
+  }
+
+  function drawUsers(users) {
+    if (!users.length) { $("users").innerHTML = '<div class="empty">名单是空的</div>'; return; }
+    var rows = users.map(function (u) {
+      var frac = Math.min((u.used_micro || 0) / Math.max(u.quota_micro || 1, 1), 1);
+      var chip = u.status === "blocked" ? '<span class="chip blocked">blocked</span>'
+               : u.plan === "member" ? '<span class="chip member">member</span>'
+               : '<span class="chip">free</span>';
+      return "<tr><td>" + esc(u.email || "—") + "</td><td>" + chip + "</td>" +
+        '<td><div class="bar-track"><div class="bar-fill' + (frac > 0.85 ? " hot" : "") + '" style="width:' + (frac * 100).toFixed(1) + '%"></div></div>' +
+        '<span class="muted" style="font-size:11.5px">' + usd(u.used_micro || 0) + " / " + usd(u.quota_micro || 0) + "</span></td>" +
+        "<td>" + (u.requests || 0) + '</td><td class="muted">' + ago(u.last_active) + "</td></tr>";
+    }).join("");
+    $("users").innerHTML = "<table><thead><tr><th>邮箱</th><th>档位</th><th>本月已用</th><th>请求</th><th>最后活动</th></tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+
+  function drawHealth(rows, serverTime, version) {
+    var html = rows.map(function (p) {
+      var warn = (p.note || "").indexOf("占位") >= 0;
+      return '<div class="health-row"><span class="k">' + esc(p.key) + " = " + esc(p.micros_per_unit) + "</span>" +
+        '<span class="' + (warn ? "warnnote" : "muted") + '" style="text-align:right">' + esc(p.note || "") + "</span></div>";
+    }).join("");
+    html += '<div class="health-row"><span class="k">server</span><span class="muted">' +
+      (version ? "函数 v" + esc(version) + " · " : "") + esc(serverTime || "") + "</span></div>";
+    $("health").innerHTML = html;
+  }
+
+  function boot() { loadStats(false); }
+  boot();
+})();
+</script>
+</body>
+</html>
