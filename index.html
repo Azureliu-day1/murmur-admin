@@ -364,11 +364,18 @@ tr:last-child td { border-bottom: none; }
     var sxDot = sx.ok ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>';
     var sxRight;
     if (sx.ok) {
-      // 我们账本的本月 ASR 消耗(日桶里 asr_micro 求和),和它家自报的并排
+      // 它家账 = 这把 Key 的**全部**本月用量(含 Wei 自己 BYO 的日常听写);
+      // 代付 = 只有账本里的部分 —— 两个口径天生不等,措辞必须说清,不然像记错账
+      var parts2 = [];
+      (sx.models || []).forEach(function (m) {
+        var isRT = m.model.indexOf("rt") >= 0;
+        parts2.push((isRT ? "实时 $" : "异步 $") + m.cost_usd.toFixed(3) +
+                    (isRT ? "/" + m.audio_minutes + "分钟" : ""));
+      });
       var ourAsr = 0;
       daily.forEach(function (r) { ourAsr += (r.asr_micro || 0); });
-      sxRight = '<span class="num2">它家账 $' + Number(sx.month_cost_usd || 0).toFixed(4) + "</span>" +
-        ' <span class="muted">· 我们账 ' + usd(ourAsr) + "(30 天口径)</span>";
+      sxRight = '<span class="num2">本月整把 Key $' + Number(sx.month_cost_usd || 0).toFixed(3) + "</span>" +
+        ' <span class="muted">· ' + esc(parts2.join(" · ")) + " · 其中代付 " + usd(ourAsr) + "</span>";
     } else {
       sxRight = '<span style="color:var(--warn)">' + esc(sx.detail || "探测失败") + "</span>";
     }
