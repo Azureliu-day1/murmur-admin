@@ -5,414 +5,869 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>Murmur 后台</title>
+
+<!--
+  Murmur 管理后台 · 单文件,零依赖,零构建。
+
+  ⚠️ 这个文件以前住在 server/supabase/functions/murmur/admin.ts 里,包在一个 TS
+     模板字符串中 —— 于是每个正则的反斜杠都要双写(`\\D` vs `\D`),`${}` 会被
+     外层吃掉「坏得毫无声息」,而且没法在浏览器里直接打开、没法当 HTML 校验。
+     那个 admin.ts 其实**从来没被部署过**(index.ts 没 import 它),它只是一份
+     放错地方的 HTML。2026-08-29 搬到这里,原文件删除。
+
+  发布:这份文件推到 Azureliu-day1/murmur-admin(GitHub Pages)。
+        Supabase 免费档会把函数的 text/html 强改成 text/plain(防钓鱼),
+        所以页面本体不能由函数直接吐,/admin 只是个 302。
+
+  安全:HTML 本身公开无害,里面没有任何数据。门在服务端:
+        /admin/stats 与 /admin/action 都要 Bearer + 管理员邮箱比对。
+        ⛔ 页面上的任何判断都不算数 —— 它是公开文件,谁都能改。
+
+  设计:抄 App 的 DesignSystem.swift。中性大面积 + 珊瑚小面积。
+        企业级不等于花哨:密度高、数字对齐、状态用形状不只用颜色。
+-->
+
 <style>
 :root {
-  --bg: #F7F7F8; --card: #FFFFFF; --ink: #1B1B1F; --second: #55555C;
-  --faint: #8E8E96; --line: #E9E9EC; --line2: #D6D6DC;
-  --coral: #E2531F; --coral-tint: #FBEFE9; --warn: #96570A; --warn-tint: #FAF2E0;
-  --green: #2E7D4F; --asr: #E2531F; --llm: #3667C9;
+  --bg: #F7F7F8; --card: #FFFFFF; --sunk: #F0F0F2;
+  --ink: #1B1B1F; --second: #55555C; --faint: #8E8E96;
+  --line: #E9E9EC; --line2: #D6D6DC;
+  --coral: #E2531F; --coral-tint: #FBEFE9;
+  --warn: #96570A; --warn-tint: #FAF2E0;
+  --stop: #A62B1B; --stop-tint: #FBE9E6;
+  --green: #2E7D4F; --green-tint: #E6F1EA;
+  --asr: #E2531F; --llm: #3667C9;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #161618; --card: #1E1E21; --ink: #F2F2F4; --second: #A0A0A8;
-    --faint: #6E6E76; --line: #2C2C31; --line2: #3A3A41;
-    --coral: #FF6B35; --coral-tint: #3A2118; --warn: #D9A441; --warn-tint: #2B2416;
-    --green: #5FBF87; --asr: #ED6234; --llm: #5583DB;
+    --bg: #161618; --card: #1E1E21; --sunk: #232327;
+    --ink: #F2F2F4; --second: #A0A0A8; --faint: #6E6E76;
+    --line: #2C2C31; --line2: #3A3A41;
+    --coral: #FF6B35; --coral-tint: #3A2118;
+    --warn: #D9A441; --warn-tint: #2B2416;
+    --stop: #E8796A; --stop-tint: #33201D;
+    --green: #5FBF87; --green-tint: #1C2A21;
+    --asr: #ED6234; --llm: #5583DB;
   }
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
   background: var(--bg); color: var(--ink);
-  font: 14px/1.55 -apple-system, "PingFang SC", "Noto Sans SC", sans-serif;
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
-.wrap { max-width: 960px; margin: 0 auto; padding: 28px 20px 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 26px 20px 80px; }
+
+/* ── 顶栏 ─────────────────────────────────────────── */
+.topbar { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
 .brand { display: flex; align-items: center; gap: 9px; }
-.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); }
+.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); flex: none; }
 .brand .name { font: 600 20px/1 Georgia, "Songti SC", serif; }
-.topbar { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 28px; }
-.topbar .who { color: var(--faint); font-size: 12px; display: flex; gap: 14px; align-items: baseline; }
-.topbar button { background: none; border: none; color: var(--second); font-size: 12px; cursor: pointer; }
-.topbar button:hover { color: var(--coral); }
-.eyebrow { font-size: 11px; letter-spacing: .5px; color: var(--faint); margin-bottom: 10px; }
-.eyebrow b { color: var(--second); font-weight: 500; }
-.grid4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.brand .tag { font-size: 11px; color: var(--faint); letter-spacing: .06em; text-transform: uppercase; margin-left: 4px; }
+.who { color: var(--faint); font-size: 12px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+.who b { color: var(--second); font-weight: 500; }
+.linkbtn { background: none; border: none; color: var(--second); font-size: 12px; cursor: pointer; padding: 0; font-family: inherit; }
+.linkbtn:hover { color: var(--coral); }
+
+/* ── 卡片与栅格 ───────────────────────────────────── */
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
-.stat .num { font-size: 28px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
-.stat .sub { font-size: 12px; color: var(--faint); margin-top: 2px; font-variant-numeric: tabular-nums; }
-.section { margin-bottom: 24px; }
-.chart-box { position: relative; }
-.chart-svg { width: 100%; height: 180px; display: block; }
-.legend { display: flex; gap: 16px; font-size: 12px; color: var(--second); margin-top: 10px; }
-.legend .key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
-.tip {
-  position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
-  font-size: 12px; padding: 6px 10px; border-radius: 8px; white-space: nowrap;
-  transform: translate(-50%, -110%); display: none; font-variant-numeric: tabular-nums;
-}
+.section { margin-bottom: 22px; }
+.eyebrow { font-size: 11px; letter-spacing: .06em; color: var(--faint); margin-bottom: 10px; text-transform: uppercase; }
+.eyebrow b { color: var(--second); font-weight: 500; text-transform: none; letter-spacing: 0; font-size: 12.5px; }
+.grid { display: grid; gap: 12px; }
+.g6 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+
+.stat .num { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; line-height: 1.1; }
+.stat .lbl { font-size: 11.5px; color: var(--faint); margin-bottom: 6px; }
+.stat .sub { font-size: 11.5px; color: var(--faint); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+/* ── 表 ───────────────────────────────────────────── */
+.tablebox { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-th { text-align: left; font-size: 11px; letter-spacing: .5px; color: var(--faint); font-weight: 500;
-     padding: 4px 10px 8px; border-bottom: 1px solid var(--line); }
-td { padding: 10px; font-size: 13px; border-bottom: 1px solid var(--line); }
+th { text-align: left; font-size: 11px; letter-spacing: .04em; color: var(--faint); font-weight: 500;
+     padding: 4px 10px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--coral); }
+th .arrow { opacity: .5; font-size: 9px; }
+td { padding: 9px 10px; font-size: 13px; border-bottom: 1px solid var(--line); }
 tr:last-child td { border-bottom: none; }
-.chip { display: inline-block; font-size: 11px; padding: 2px 9px; border-radius: 99px; border: 1px solid var(--line2); color: var(--second); }
-.chip.member { border-color: var(--coral); color: var(--coral); }
-.chip.blocked { border-color: var(--warn); color: var(--warn); background: var(--warn-tint); }
-.bar-track { width: 110px; height: 5px; border-radius: 99px; background: var(--line); overflow: hidden; }
+tbody tr.clickable { cursor: pointer; }
+tbody tr.clickable:hover td { background: var(--sunk); }
+td.num, th.num { text-align: right; }
+
+/* ── 标记 ─────────────────────────────────────────── */
+.chip { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line2); color: var(--second); white-space: nowrap; }
+.chip.pro { border-color: var(--coral); color: var(--coral); }
+.chip.dev { border-color: var(--llm); color: var(--llm); }
+.chip.banned { border-color: var(--stop); color: var(--stop); background: var(--stop-tint); }
+.chip.ok { border-color: var(--green); color: var(--green); }
+.chip.risk { border-color: var(--warn); color: var(--warn); background: var(--warn-tint); }
+
+.bar-track { width: 96px; height: 5px; border-radius: 99px; background: var(--line); overflow: hidden; display: inline-block; vertical-align: middle; }
 .bar-fill { height: 100%; border-radius: 99px; background: var(--coral); min-width: 2px; }
 .bar-fill.hot { background: var(--warn); }
+.bar-fill.over { background: var(--stop); }
 .muted { color: var(--faint); }
-.health-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
-.health-row:last-child { border-bottom: none; }
-.health-row .k { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
-.health-row .warnnote { color: var(--warn); }
-.empty { color: var(--faint); font-size: 13px; text-align: center; padding: 36px 0; }
-.dot-ok, .dot-bad { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 0; }
-.dot-ok { background: var(--green); }
-.dot-bad { background: var(--warn); }
-.api-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
-.api-row:last-child { border-bottom: none; }
-.api-row .num2 { font-variant-numeric: tabular-nums; font-weight: 600; }
-/* 登录 */
-.login { max-width: 420px; margin: 10vh auto 0; }
-.login h1 { font-size: 22px; font-weight: 600; margin: 26px 0 4px; }
-.login .lead { color: var(--second); font-size: 13px; margin-bottom: 24px; }
-.login label { display: block; font-size: 12px; color: var(--second); margin: 0 0 4px; font-weight: 500; }
-.login input {
-  width: 100%; background: var(--bg); border: 1px solid var(--line2); border-radius: 8px;
-  padding: 9px 12px; font-size: 14px; color: var(--ink); outline: none; margin-bottom: 12px;
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* ── 异常信号:必须刺眼,但不许铺满 ───────────────── */
+.alarm { border-color: var(--warn); background: var(--warn-tint); }
+.alarm.high { border-color: var(--stop); background: var(--stop-tint); }
+.alarm-row { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,.16); flex-wrap: wrap; }
+.alarm-row:last-child { border-bottom: none; }
+.alarm-row .sig { font-weight: 600; font-size: 13px; }
+.alarm-row .who2 { font-size: 12.5px; }
+.alarm-row .det { font-size: 12px; color: var(--second); }
+
+/* ── 图 ───────────────────────────────────────────── */
+.chart-box { position: relative; }
+.chart-svg { width: 100%; height: 170px; display: block; }
+.legend { display: flex; gap: 16px; font-size: 12px; color: var(--second); margin-top: 8px; flex-wrap: wrap; }
+.legend .key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
+       font-size: 12px; padding: 6px 10px; border-radius: 8px; white-space: pre; display: none;
+       transform: translate(-50%, -112%); font-variant-numeric: tabular-nums; z-index: 5; }
+
+/* 功能排行的横条 */
+.rank-row { display: grid; grid-template-columns: 84px 1fr 90px; gap: 10px; align-items: center; padding: 6px 0; }
+.rank-bar { height: 18px; border-radius: 5px; background: var(--coral); opacity: .82; min-width: 2px; }
+.rank-row .n { text-align: right; font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--second); }
+
+/* ── 抽屉 ─────────────────────────────────────────── */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.34); display: none; z-index: 40; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw);
+  background: var(--card); border-left: 1px solid var(--line);
+  padding: 22px 22px 40px; overflow-y: auto; display: none; z-index: 41;
 }
-.login input:focus { border-color: var(--coral); }
-.login input.code { font: 600 22px/1.3 ui-monospace, Menlo, monospace; letter-spacing: 6px; }
-.login .go {
-  width: 100%; border: none; border-radius: 8px; padding: 10px; font-size: 13.5px; font-weight: 600;
-  background: var(--coral); color: #fff; cursor: pointer; margin-top: 4px;
+.drawer h3 { font-size: 17px; font-weight: 600; margin-bottom: 2px; word-break: break-all; }
+.drawer .kv { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.drawer .kv:last-of-type { border-bottom: none; }
+.drawer .kv .k { color: var(--faint); }
+.drawer .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+.act { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line2); }
+.act h4 { font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
+input[type=text], input[type=email], input[type=number], select {
+  width: 100%; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px;
+  font: inherit; font-size: 13px; margin-bottom: 8px;
 }
-.login .go:disabled { background: var(--line); color: var(--faint); cursor: default; }
-.login .alt { background: none; border: none; color: var(--second); font-size: 12px; cursor: pointer; margin-top: 14px; }
-.notice { color: var(--warn); font-size: 12.5px; margin-top: 12px; }
-.hidden { display: none; }
+input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px; }
+.btn { border: none; border-radius: 99px; padding: 8px 16px; font: inherit; font-size: 13px;
+       font-weight: 500; cursor: pointer; background: var(--coral); color: #fff; }
+.btn:hover { filter: brightness(1.06); }
+.btn[disabled] { opacity: .45; cursor: default; filter: none; }
+.btn.quiet { background: var(--sunk); color: var(--second); }
+.btn.danger { background: var(--stop); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.note { font-size: 11.5px; color: var(--faint); margin-top: 6px; line-height: 1.6; }
+.err { color: var(--stop); font-size: 12.5px; margin-top: 8px; }
+.okmsg { color: var(--green); font-size: 12.5px; margin-top: 8px; }
+
+/* ── 筛选条 ───────────────────────────────────────── */
+.filters { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.filters input[type=text] { width: 220px; margin-bottom: 0; }
+.tab { border: 1px solid var(--line2); background: none; color: var(--second);
+       border-radius: 99px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+.tab.on { border-color: var(--coral); color: var(--coral); background: var(--coral-tint); }
+
+/* ── 登录 ─────────────────────────────────────────── */
+.gate { max-width: 380px; margin: 12vh auto; }
+.gate h2 { font: 600 19px/1.3 Georgia, "Songti SC", serif; margin-bottom: 4px; }
+.hidden { display: none !important; }
+@media (max-width: 640px) { .wrap { padding: 18px 14px 60px; } .stat .num { font-size: 22px; } }
 </style>
 </head>
 <body>
+
 <div class="wrap">
-  <!-- 登录(未登录态) -->
-  <div id="login" class="login hidden">
-    <div class="brand"><div class="dot"></div><div class="name">Murmur</div></div>
-    <h1>后台</h1>
-    <p class="lead">只有管理员能看。填邮箱,给你发一封带验证码的信。</p>
-    <div id="step-email">
-      <label>邮箱</label>
-      <input id="email" type="email" placeholder="you@example.com" autocomplete="email">
-      <button id="send" class="go">发登录邮件</button>
+
+  <div class="topbar">
+    <div class="brand">
+      <span class="dot"></span><span class="name">Murmur</span>
+      <span class="tag">admin</span>
     </div>
-    <div id="step-code" class="hidden">
-      <label>验证码</label>
-      <input id="code" class="code" inputmode="numeric" placeholder="6 位数字" maxlength="6">
-      <label>或者,粘贴邮件里的链接</label>
-      <input id="link" type="text" placeholder="https://…verify?token=…">
-      <button id="verify" class="go">进入后台</button>
-      <button id="back" class="alt">换个邮箱</button>
-    </div>
-    <div id="login-notice" class="notice hidden"></div>
+    <div class="who" id="who"></div>
   </div>
 
-  <!-- 仪表盘(登录态) -->
-  <div id="dash" class="hidden">
-    <div class="topbar">
-      <div class="brand"><div class="dot"></div><div class="name">Murmur</div>
-        <span style="color:var(--faint);font-size:12px;margin-left:6px">后台</span></div>
-      <div class="who"><span id="who"></span><button id="signout">退出</button></div>
-    </div>
-
-    <div class="grid4" id="stats"></div>
-
-    <div class="section card chart-box">
-      <div class="eyebrow">usage · <b>30 天用量(墨尔本日界)</b></div>
-      <div id="chart"></div>
-      <div class="legend">
-        <span><span class="key" style="background:var(--asr)"></span>识别(音频)</span>
-        <span><span class="key" style="background:var(--llm)"></span>整理(大模型)</span>
+  <!-- ── 登录 ─────────────────────────────────────── -->
+  <div id="gate" class="gate">
+    <div class="card">
+      <h2>管理后台</h2>
+      <p class="note" style="margin-bottom:14px">用管理员邮箱收一个验证码。会话存在这台浏览器里,下次直接进。</p>
+      <div id="step1">
+        <input id="email" type="email" placeholder="管理员邮箱" autocomplete="username">
+        <button class="btn" id="send">发验证码</button>
       </div>
-      <div class="tip" id="tip"></div>
+      <div id="step2" class="hidden">
+        <input id="code" type="text" inputmode="numeric" placeholder="邮件里的 6 位码" autocomplete="one-time-code">
+        <button class="btn" id="verify">进后台</button>
+        <p class="note">收不到码?把邮件里那个按钮的链接整条粘进来也行:</p>
+        <input id="link" type="text" placeholder="https://…verify?token=…">
+        <button class="btn quiet" id="verifyLink">用链接进</button>
+      </div>
+      <div id="gateMsg"></div>
+    </div>
+  </div>
+
+  <!-- ── 主体 ─────────────────────────────────────── -->
+  <div id="main" class="hidden">
+
+    <!-- 异常信号置顶:最该看见的东西不能排在第三屏 -->
+    <div class="section hidden" id="alarmSec">
+      <div class="eyebrow">alerts · <b>需要你看一眼的</b></div>
+      <div class="card alarm" id="alarms"></div>
     </div>
 
-    <div class="section card">
-      <div class="eyebrow">upstream · <b>上游 API</b></div>
-      <div id="apis"></div>
+    <div class="section">
+      <div class="eyebrow">overview · <b>总览</b></div>
+      <div class="grid g6" id="overview"></div>
     </div>
 
-    <div class="section card">
-      <div class="eyebrow">users · <b>内测名单</b></div>
-      <div id="users"></div>
+    <div class="section">
+      <div class="eyebrow">users · <b>用户</b></div>
+      <div class="card">
+        <div class="filters">
+          <input id="q" type="text" placeholder="搜邮箱…">
+          <button class="tab on" data-f="all">全部</button>
+          <button class="tab" data-f="free">免费</button>
+          <button class="tab" data-f="pro">Pro</button>
+          <button class="tab" data-f="developer">开发者</button>
+          <button class="tab" data-f="banned">已封禁</button>
+          <button class="tab" data-f="risk">有风险</button>
+          <span class="muted" id="userCount" style="font-size:12px;margin-left:auto"></span>
+        </div>
+        <div class="tablebox"><table id="users"></table></div>
+        <p class="note">点任意一行看详情、封禁、调额度、给档位。</p>
+      </div>
     </div>
 
-    <div class="section card">
-      <div class="eyebrow">health · <b>服务器健康</b></div>
-      <div id="health"></div>
+    <div class="section grid g2">
+      <div class="card">
+        <div class="eyebrow">features · <b>30 天功能使用</b></div>
+        <div id="featRank"></div>
+        <p class="note">⚠️ 这是<b>代付口径</b>:服务端只看得见经过服务器的动作。没登录的人、
+          以及整条链路都在本机跑的动作(本机识别 + 不整理),一次都不会出现在这里。</p>
+      </div>
+      <div class="card">
+        <div class="eyebrow">daily · <b>每天用量(墨尔本日界)</b></div>
+        <div class="chart-box">
+          <svg class="chart-svg" id="dailyChart"></svg>
+          <div class="tip" id="dailyTip"></div>
+        </div>
+        <div class="legend">
+          <span><i class="key" style="background:var(--asr)"></i>识别</span>
+          <span><i class="key" style="background:var(--llm)"></i>大模型</span>
+        </div>
+      </div>
     </div>
+
+    <div class="section">
+      <div class="eyebrow">features/day · <b>每天各功能次数</b></div>
+      <div class="card chart-box">
+        <svg class="chart-svg" id="featChart" style="height:150px"></svg>
+        <div class="tip" id="featTip"></div>
+        <div class="legend" id="featLegend"></div>
+      </div>
+    </div>
+
+    <div class="section grid g2">
+      <div class="card">
+        <div class="eyebrow">upstream · <b>上游 API</b></div>
+        <div id="upstream"></div>
+      </div>
+      <div class="card">
+        <div class="eyebrow">plans · <b>档位与定价</b></div>
+        <div class="tablebox"><table id="plans"></table></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="eyebrow">audit · <b>后台操作留痕</b></div>
+      <div class="card"><div class="tablebox"><table id="audit"></table></div></div>
+    </div>
+
   </div>
 </div>
 
+<div class="scrim" id="scrim"></div>
+<div class="drawer" id="drawer"></div>
+
 <script>
-(function () {
-  // 页面住在 GitHub Pages(Supabase 免费档不让函数出 text/html,防钓鱼),
-  // API 和登录接口在 Supabase —— 跨域,靠函数侧的 CORS 头放行
-  var HOST = "https://syebvkwemxwxkonvsyjd.supabase.co";
-  var APIKEY = "sb_publishable_bBmuodbgO72q8CK_kacrSw_0o3cCsOd"; // 设计上可公开值,RLS 兜底
-  var SKEY = "murmur_admin_session";
+"use strict";
+// ⚠️ 全文不用模板字面量。这份文件历史上住在 TS 模板串里,`${}` 会被外层吃掉;
+//    虽然现在搬出来了,但保持同一纪律 —— 万一有人再把它塞回去,不会静默坏掉。
+var HOST = "https://syebvkwemxwxkonvsyjd.supabase.co";
+var API = HOST + "/functions/v1/murmur";
+var ANON = "sb_publishable_bBmuodbgO72q8CK_kacrSw_0o3cCsOd";
+var SKEY = "murmur.admin.session";
 
-  var $ = function (id) { return document.getElementById(id); };
-  function show(el) { el.classList.remove("hidden"); }
-  function hide(el) { el.classList.add("hidden"); }
-  function notice(msg) { var n = $("login-notice"); n.textContent = msg; msg ? show(n) : hide(n); }
-
-  function session() { try { return JSON.parse(localStorage.getItem(SKEY) || "null"); } catch (e) { return null; } }
-  function saveSession(s) { try { localStorage.setItem(SKEY, JSON.stringify(s)); } catch (e) {} }
-  function clearSession() { try { localStorage.removeItem(SKEY); } catch (e) {} }
-
-  // ── 金额与时间 ──
-  function usd(micro) { return "$" + (micro / 1e6).toFixed(4); }
-  function ago(iso) {
-    if (!iso) return "—";
-    var s = (Date.now() - new Date(iso).getTime()) / 1000;
-    if (s < 90) return "刚刚";
-    if (s < 5400) return Math.round(s / 60) + " 分钟前";
-    if (s < 129600) return Math.round(s / 3600) + " 小时前";
-    return Math.round(s / 86400) + " 天前";
-  }
-  function esc(t) { var d = document.createElement("div"); d.textContent = t == null ? "" : String(t); return d.innerHTML; }
-
-  // ── 登录(邮箱 + 6 位码;粘链接兜底)──
-  var pendingEmail = "";
-  $("send").onclick = function () {
-    var email = $("email").value.trim();
-    if (!email || email.indexOf("@") < 1) { notice("邮箱格式不对"); return; }
-    $("send").disabled = true; notice("");
-    fetch(HOST + "/auth/v1/otp", {
-      method: "POST",
-      headers: { apikey: APIKEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ email: email, create_user: false })
-    }).then(function (r) {
-      $("send").disabled = false;
-      if (r.ok) { pendingEmail = email; hide($("step-email")); show($("step-code")); $("code").focus(); }
-      else { notice("如果这个邮箱在名单里,你会收到一封信。没收到就检查拼写。"); }
-    }).catch(function () { $("send").disabled = false; notice("网络没通,再试一次"); });
-  };
-  $("back").onclick = function () { show($("step-email")); hide($("step-code")); notice(""); };
-  $("verify").onclick = doVerify;
-  $("code").addEventListener("input", function () {
-    this.value = this.value.replace(/\D/g, "").slice(0, 6);
-    if (this.value.length === 6) doVerify();
+var $ = function (id) { return document.getElementById(id); };
+var esc = function (s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
   });
+};
+var usd = function (micro) {
+  var n = Number(micro || 0) / 1e6;
+  if (n === 0) return "$0";
+  if (n < 0.01) return "$" + n.toFixed(4);
+  return "$" + n.toFixed(2);
+};
+var when = function (iso) {
+  if (!iso) return "—";
+  var d = new Date(iso), now = new Date();
+  var mins = Math.round((now - d) / 60000);
+  if (mins < 1) return "刚刚";
+  if (mins < 60) return mins + " 分钟前";
+  if (mins < 60 * 24) return Math.round(mins / 60) + " 小时前";
+  if (mins < 60 * 24 * 30) return Math.round(mins / 1440) + " 天前";
+  return d.toLocaleDateString("zh-CN");
+};
 
-  function doVerify() {
-    var code = $("code").value.trim();
-    var link = $("link").value.trim();
-    notice("");
-    if (link) {
-      var m = link.match(/[?&](?:token_hash|token)=([^&\s]+)/);
-      if (!m) { notice("这不像一条登录链接 —— 整条复制过来"); return; }
-      verifyBody({ token_hash: m[1], type: "magiclink" }, []);
-    } else if (code.length === 6) {
-      // 新用户首封是 signup 模板 —— type 容错三值,写死一个会让第一次登录的人进不来
-      verifyBody({ email: pendingEmail, token: code, type: "email" },
-                 [{ email: pendingEmail, token: code, type: "magiclink" },
-                  { email: pendingEmail, token: code, type: "signup" }]);
-    } else { notice("填 6 位码,或把链接粘进来"); }
-  }
-  function verifyBody(body, fallbacks) {
-    fetch(HOST + "/auth/v1/verify", {
-      method: "POST",
-      headers: { apikey: APIKEY, "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
-      .then(function (res) {
-        if (res.ok && res.j.access_token) {
-          saveSession({ at: res.j.access_token, rt: res.j.refresh_token });
-          boot();
-        } else if (fallbacks.length) {
-          verifyBody(fallbacks[0], fallbacks.slice(1));
-        } else {
-          notice("码没对上(过期了就重发一封)");
-        }
-      }).catch(function () { notice("网络没通,再试一次"); });
-  }
+// ── 会话 ──────────────────────────────────────────
+function session() { try { return JSON.parse(localStorage.getItem(SKEY) || "null"); } catch (e) { return null; } }
+function saveSession(s) { try { localStorage.setItem(SKEY, JSON.stringify(s)); } catch (e) {} }
+function clearSession() { try { localStorage.removeItem(SKEY); } catch (e) {} }
 
-  $("signout").onclick = function () { clearSession(); location.reload(); };
+var pendingEmail = "";
 
-  // ── 拉数据(401 时静默刷新一次)──
-  function loadStats(retried) {
-    var s = session();
-    if (!s) { show($("login")); hide($("dash")); return; }
-    fetch(HOST + "/functions/v1/murmur/admin/stats", {
-      headers: { Authorization: "Bearer " + s.at }
-    }).then(function (r) {
-      if (r.status === 401 && !retried && s.rt) return refresh(s.rt).then(function (ok) {
-        if (ok) loadStats(true); else { clearSession(); show($("login")); hide($("dash")); }
-      });
-      if (r.status === 403) { clearSession(); show($("login")); hide($("dash")); notice("这个账号不是管理员"); return; }
-      if (!r.ok) { show($("login")); hide($("dash")); notice("服务器没接住(HTTP " + r.status + ")"); return; }
-      return r.json().then(render);
-    }).catch(function () { notice("网络没通"); });
-  }
-  function refresh(rt) {
-    return fetch(HOST + "/auth/v1/token?grant_type=refresh_token", {
-      method: "POST",
-      headers: { apikey: APIKEY, "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: rt })
-    }).then(function (r) { return r.json(); })
-      .then(function (j) {
-        if (j.access_token) { saveSession({ at: j.access_token, rt: j.refresh_token }); return true; }
-        return false;
-      }).catch(function () { return false; });
-  }
+function authHeaders() {
+  var s = session();
+  return { "Authorization": "Bearer " + (s && s.access_token), "Content-Type": "application/json" };
+}
 
-  // ── 渲染 ──
-  function render(d) {
-    hide($("login")); show($("dash"));
-    $("who").textContent = d.admin || "";
-    var o = d.overview || {};
-    $("stats").innerHTML =
-      stat(o.users, "用户", o.members + " member · " + o.free + " free" + (o.blocked ? " · " + o.blocked + " blocked" : "")) +
-      stat(usd(o.month_micro || 0), "本月总消耗", "服务器记账 · 含预扣回冲") +
-      stat(o.month_requests, "本月请求", "识别 + 整理都算一次") +
-      stat(o.active_today, "今日活跃", "墨尔本日界");
-    drawChart(d.daily || []);
-    drawApis(d.apis || {}, o.month_micro || 0, d.daily || []);
-    drawUsers(d.users || []);
-    drawHealth(d.health || [], d.server_time, d.version);
-  }
-  function stat(num, label, sub) {
-    return '<div class="card stat"><div class="num">' + esc(num) + '</div>' +
-           '<div style="font-size:12.5px;color:var(--second);margin-top:4px">' + esc(label) + '</div>' +
-           '<div class="sub">' + esc(sub) + "</div></div>";
-  }
+// ── 登录 ──────────────────────────────────────────
+$("send").onclick = function () {
+  var em = $("email").value.trim();
+  if (!em) return;
+  $("gateMsg").innerHTML = '<p class="note">发送中…</p>';
+  fetch(HOST + "/auth/v1/otp", {
+    method: "POST",
+    headers: { "apikey": ANON, "Content-Type": "application/json" },
+    body: JSON.stringify({ email: em, create_user: false })
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    pendingEmail = em;
+    $("step1").classList.add("hidden");
+    $("step2").classList.remove("hidden");
+    $("gateMsg").innerHTML = '<p class="note">信发出去了。邮件里有 6 位码,也有一个按钮链接。</p>';
+  }).catch(function (e) {
+    $("gateMsg").innerHTML = '<p class="err">发不出去(' + esc(e.message) + ')—— 这个邮箱在名单里吗?</p>';
+  });
+};
 
-  // 30 天堆叠柱。补齐没数据的日子(0 高),空月画空态。
-  function drawChart(daily) {
-    var box = $("chart");
-    if (!daily.length) { box.innerHTML = '<div class="empty">还没有用量 —— 第一句听写之后这里会长出柱子</div>'; return; }
-    var byDay = {}; daily.forEach(function (r) { byDay[r.day] = r; });
-    var days = [];
-    for (var i = 29; i >= 0; i--) {
-      var dt = new Date(Date.now() - i * 86400000);
-      var key = dt.toLocaleDateString("sv-SE", { timeZone: "Australia/Melbourne" }); // YYYY-MM-DD
-      days.push(byDay[key] || { day: key, asr_micro: 0, llm_micro: 0, total_micro: 0, requests: 0, active: 0 });
-    }
-    var max = Math.max.apply(null, days.map(function (r) { return r.total_micro || 0; }).concat([1]));
-    var W = 900, H = 180, PAD = 4, bw = (W - PAD * 2) / 30;
-    var svg = '<svg class="chart-svg" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none">';
-    // recessive 网格:只画一条中线
-    svg += '<line x1="0" y1="' + (H / 2) + '" x2="' + W + '" y2="' + (H / 2) + '" stroke="var(--line)" stroke-width="1"/>';
-    days.forEach(function (r, idx) {
-      var x = PAD + idx * bw + bw * 0.18, w = bw * 0.64;
-      var hA = (r.asr_micro || 0) / max * (H - 24);
-      var hL = (r.llm_micro || 0) / max * (H - 24);
-      var yL = H - 6 - hL, yA = yL - 2 - hA; // 段间 2px 露底
-      if (hL > 0.5) svg += '<rect x="' + x + '" y="' + yL + '" width="' + w + '" height="' + hL + '" fill="var(--llm)" rx="1.5"/>';
-      if (hA > 0.5) svg += '<rect x="' + x + '" y="' + yA + '" width="' + w + '" height="' + hA + '" fill="var(--asr)" rx="4"/>';
-      if (hA <= 0.5 && hL <= 0.5) svg += '<rect x="' + x + '" y="' + (H - 8) + '" width="' + w + '" height="2" fill="var(--line)" rx="1"/>';
-      // 命中区比柱子宽(交互规范:hit target ≥ mark)
-      svg += '<rect data-i="' + idx + '" x="' + (PAD + idx * bw) + '" y="0" width="' + bw + '" height="' + H + '" fill="transparent"/>';
+$("code").oninput = function () { this.value = this.value.replace(/\D/g, "").slice(0, 6); };
+
+function verifyBody(body, fallbacks) {
+  $("gateMsg").innerHTML = '<p class="note">验证中…</p>';
+  fetch(HOST + "/auth/v1/verify", {
+    method: "POST",
+    headers: { "apikey": ANON, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (res.ok && res.j.access_token) { saveSession(res.j); boot(); return; }
+      if (fallbacks && fallbacks.length) { verifyBody(fallbacks[0], fallbacks.slice(1)); return; }
+      $("gateMsg").innerHTML = '<p class="err">验不过 —— 码可能过期了(每个码只活几分钟),重发一次。</p>';
+    }).catch(function (e) {
+      $("gateMsg").innerHTML = '<p class="err">' + esc(e.message) + '</p>';
     });
-    svg += "</svg>";
-    box.innerHTML = svg;
-    var tip = $("tip");
-    box.querySelector("svg").addEventListener("mousemove", function (ev) {
-      var t = ev.target.getAttribute("data-i");
-      if (t == null) { tip.style.display = "none"; return; }
-      var r = days[+t];
-      var rect = box.getBoundingClientRect();
-      tip.innerHTML = esc(r.day.slice(5)) + " · " + usd(r.total_micro || 0) +
-        '<br>识别 ' + usd(r.asr_micro || 0) + " · 整理 " + usd(r.llm_micro || 0) +
-        "<br>" + (r.requests || 0) + " 次 · " + (r.active || 0) + " 人";
-      tip.style.left = (ev.clientX - rect.left) + "px";
-      tip.style.top = (ev.clientY - rect.top - 8) + "px";
-      tip.style.display = "block";
+}
+
+$("verify").onclick = function () {
+  var c = $("code").value.trim();
+  if (c.length !== 6) return;
+  verifyBody({ email: pendingEmail, token: c, type: "email" },
+             [{ email: pendingEmail, token: c, type: "magiclink" },
+              { email: pendingEmail, token: c, type: "signup" }]);
+};
+
+$("verifyLink").onclick = function () {
+  var link = $("link").value.trim();
+  var m = link.match(/[?&](?:token_hash|token)=([^&\s]+)/);
+  if (!m) { $("gateMsg").innerHTML = '<p class="err">这不像一条登录链接。</p>'; return; }
+  verifyBody({ token_hash: m[1], type: "magiclink" }, []);
+};
+
+// ── 拉数据 ────────────────────────────────────────
+var DATA = null;
+
+function boot() {
+  var s = session();
+  if (!s || !s.access_token) { $("gate").classList.remove("hidden"); $("main").classList.add("hidden"); return; }
+  $("gate").classList.add("hidden");
+  load();
+}
+
+function load() {
+  $("who").innerHTML = '<span class="muted">加载中…</span>';
+  fetch(API + "/admin/stats", { headers: authHeaders() })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok) {
+        // 401/403 = 会话过期或不是管理员。别把两者说成同一句 —— 处理方式不同。
+        if (res.status === 401) { clearSession(); boot(); return; }
+        var msg = (res.j && res.j.error && res.j.error.message) || ("HTTP " + res.status);
+        $("who").innerHTML = '<span class="err">' + esc(msg) + '</span>';
+        return;
+      }
+      DATA = res.j;
+      $("main").classList.remove("hidden");
+      render();
+    })
+    .catch(function (e) {
+      $("who").innerHTML = '<span class="err">连不上服务器:' + esc(e.message) + '</span>';
     });
-    box.querySelector("svg").addEventListener("mouseleave", function () { tip.style.display = "none"; });
+}
+
+function render() {
+  var d = DATA;
+  $("who").innerHTML =
+    '<span><b>' + esc(d.admin || "") + '</b></span>' +
+    '<span>数据截至 ' + esc(new Date(d.server_time).toLocaleString("zh-CN")) + '</span>' +
+    '<button class="linkbtn" onclick="load()">刷新</button>' +
+    '<button class="linkbtn" onclick="clearSession();location.reload()">退出</button>';
+
+  renderAlarms(d.anomalies || []);
+  renderOverview(d.overview || {});
+  renderUsers();
+  renderFeatures(d.feature_totals || [], d.features || []);
+  renderDaily(d.daily || []);
+  renderUpstream(d);
+  renderPlans(d.plans || []);
+  renderAudit(d.audit || []);
+}
+
+// ── 异常信号 ──────────────────────────────────────
+function renderAlarms(list) {
+  var extra = [];
+  // 待认领订单也是「钱收了还没落到人头上」,和异常同等级别,放一起
+  (DATA.pending_purchases || []).forEach(function (p) {
+    extra.push({ severity: "medium", signal: "网站订单还没被认领",
+      email: p.email, detail: "订阅号 " + p.external_ref + ",这个邮箱还没在 App 里登录过" });
+  });
+  var all = list.concat(extra);
+  if (!all.length) { $("alarmSec").classList.add("hidden"); return; }
+  $("alarmSec").classList.remove("hidden");
+  var high = all.some(function (a) { return a.severity === "high"; });
+  $("alarms").className = "card alarm" + (high ? " high" : "");
+  $("alarms").innerHTML = all.map(function (a) {
+    return '<div class="alarm-row">' +
+      '<span class="sig">' + esc(a.signal) + '</span>' +
+      '<span class="who2 mono">' + esc(a.email || "—") + '</span>' +
+      '<span class="det">' + esc(a.detail || "") + '</span>' +
+    '</div>';
+  }).join("");
+}
+
+// ── 总览 ──────────────────────────────────────────
+function renderOverview(o) {
+  function stat(lbl, num, sub) {
+    return '<div class="card stat"><div class="lbl">' + esc(lbl) + '</div>' +
+           '<div class="num">' + esc(num) + '</div>' +
+           (sub ? '<div class="sub">' + esc(sub) + '</div>' : "") + '</div>';
   }
+  var mrr = (Number(o.mrr_cents || 0) / 100).toFixed(2);
+  $("overview").innerHTML =
+    stat("用户", o.users || 0, (o.banned ? o.banned + " 个已封禁" : "全部正常")) +
+    stat("今天活跃", o.dau || 0, "7 天 " + (o.wau || 0) + " · 30 天 " + (o.mau || 0)) +
+    stat("档位分布", (o.plan_free || 0) + " / " + (o.plan_pro || 0) + " / " + (o.plan_dev || 0), "免费 / Pro / 开发者") +
+    stat("月流水", "AU$" + mrr, "Stripe 生效订阅") +
+    stat("今天花费", usd(o.spend_today), "30 天 " + usd(o.spend_30d)) +
+    stat("待认领订单", o.pending_claims || 0, o.pending_claims ? "钱收了没落到人头上" : "没有");
+}
 
-  // 上游两家的活体状态。Soniox 行并排放两个口径:它家自报的本月成本 vs 我们账本的
-  // ASR 消耗 —— 失败请求不入它家日志,所以它 ≤ 我们的账是正常方向,反了才要查。
-  function drawApis(apis, monthMicro, daily) {
-    var el = document.getElementById("apis");
-    if (!el) return;
-    var html = "";
-    var ds = apis.deepseek || {};
-    var dsDot = ds.ok ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>';
-    var dsRight;
-    if (ds.ok && ds.balances) {
-      var parts = [];
-      ds.balances.forEach(function (b) {
-        if (Number(b.total) > 0 || b.currency === "CNY") {
-          parts.push((b.currency === "CNY" ? "¥" : "$") + b.total);
-        }
-      });
-      var cny = ds.balances.filter(function (b) { return b.currency === "CNY"; })[0];
-      var low = cny && Number(cny.total) < 5;
-      dsRight = '<span class="num2">余额 ' + esc(parts.join(" · ")) + "</span>" +
-        (low ? ' <span style="color:var(--warn)">· 快见底了,记得充</span>' : "");
-    } else {
-      dsRight = '<span style="color:var(--warn)">' + esc(ds.detail || "探测失败") + "</span>";
-    }
-    html += '<div class="api-row"><span>' + dsDot + "DeepSeek(整理 · 代付从这扣钱)</span>" +
-      '<span class="muted">' + dsRight + "</span></div>";
+// ── 用户表 ────────────────────────────────────────
+var filter = "all", sortKey = "last_seen", sortDir = -1, query = "";
 
-    var sx = apis.soniox || {};
-    var sxDot = sx.ok ? '<span class="dot-ok"></span>' : '<span class="dot-bad"></span>';
-    var sxRight;
-    if (sx.ok) {
-      // 它家账 = 这把 Key 的**全部**本月用量(含 Wei 自己 BYO 的日常听写);
-      // 代付 = 只有账本里的部分 —— 两个口径天生不等,措辞必须说清,不然像记错账
-      var parts2 = [];
-      (sx.models || []).forEach(function (m) {
-        var isRT = m.model.indexOf("rt") >= 0;
-        parts2.push((isRT ? "实时 $" : "异步 $") + m.cost_usd.toFixed(3) +
-                    (isRT ? "/" + m.audio_minutes + "分钟" : ""));
-      });
-      var ourAsr = 0;
-      daily.forEach(function (r) { ourAsr += (r.asr_micro || 0); });
-      sxRight = '<span class="num2">本月整把 Key $' + Number(sx.month_cost_usd || 0).toFixed(3) + "</span>" +
-        ' <span class="muted">· ' + esc(parts2.join(" · ")) + " · 其中代付 " + usd(ourAsr) + "</span>";
-    } else {
-      sxRight = '<span style="color:var(--warn)">' + esc(sx.detail || "探测失败") + "</span>";
-    }
-    html += '<div class="api-row"><span>' + sxDot + "Soniox(语音识别 · 通行证从这签)</span>" +
-      '<span class="muted">' + sxRight + "</span></div>";
-    el.innerHTML = html;
+function riskCount(u) {
+  var n = 0;
+  if (u.settle_zero >= 3) n++;
+  if (u.leases_unsettled >= 3) n++;
+  if (u.status !== "active") n++;
+  return n;
+}
+
+function visibleUsers() {
+  var list = (DATA.users || []).slice();
+  if (query) {
+    var q = query.toLowerCase();
+    list = list.filter(function (u) { return String(u.email || "").toLowerCase().indexOf(q) >= 0; });
   }
+  if (filter === "banned") list = list.filter(function (u) { return u.status !== "active"; });
+  else if (filter === "risk") list = list.filter(function (u) { return riskCount(u) > 0; });
+  else if (filter !== "all") list = list.filter(function (u) { return u.plan === filter; });
+  list.sort(function (a, b) {
+    var x = a[sortKey], y = b[sortKey];
+    if (x == null) return 1; if (y == null) return -1;
+    if (typeof x === "string") return x.localeCompare(y) * sortDir;
+    return (Number(x) - Number(y)) * sortDir;
+  });
+  return list;
+}
 
-  function drawUsers(users) {
-    if (!users.length) { $("users").innerHTML = '<div class="empty">名单是空的</div>'; return; }
-    var rows = users.map(function (u) {
-      var frac = Math.min((u.used_micro || 0) / Math.max(u.quota_micro || 1, 1), 1);
-      var chip = u.status === "blocked" ? '<span class="chip blocked">blocked</span>'
-               : u.plan === "member" ? '<span class="chip member">member</span>'
-               : '<span class="chip">free</span>';
-      return "<tr><td>" + esc(u.email || "—") + "</td><td>" + chip + "</td>" +
-        '<td><div class="bar-track"><div class="bar-fill' + (frac > 0.85 ? " hot" : "") + '" style="width:' + (frac * 100).toFixed(1) + '%"></div></div>' +
-        '<span class="muted" style="font-size:11.5px">' + usd(u.used_micro || 0) + " / " + usd(u.quota_micro || 0) + "</span></td>" +
-        "<td>" + (u.requests || 0) + '</td><td class="muted">' + ago(u.last_active) + "</td></tr>";
+function renderUsers() {
+  var list = visibleUsers();
+  $("userCount").textContent = list.length + " / " + (DATA.users || []).length + " 人";
+  var cols = [
+    ["email", "邮箱", ""], ["plan", "档位", ""], ["status", "状态", ""],
+    ["used_micro", "本月花费", "num"], ["used_requests", "请求", "num"],
+    ["chars_week", "本周字数", "num"], ["lecture_minutes_month", "长录音", "num"],
+    ["last_seen", "最后活动", ""]
+  ];
+  var head = "<thead><tr>" + cols.map(function (c) {
+    var arrow = sortKey === c[0] ? '<span class="arrow">' + (sortDir < 0 ? "▼" : "▲") + "</span>" : "";
+    return '<th class="sortable ' + c[2] + '" data-k="' + c[0] + '">' + c[1] + " " + arrow + "</th>";
+  }).join("") + "<th></th></tr></thead>";
+
+  var body = list.map(function (u) {
+    var cap = Number(u.quota_micro || 0);
+    var used = Number(u.used_micro || 0);
+    var pct = cap > 0 ? Math.min(used / cap, 1.2) : 0;
+    var cls = pct >= 1 ? "over" : (pct > 0.8 ? "hot" : "");
+    var risk = riskCount(u);
+    return '<tr class="clickable" data-id="' + esc(u.user_id) + '">' +
+      "<td>" + esc(u.email) + "</td>" +
+      '<td><span class="chip ' + (u.plan === "pro" ? "pro" : u.plan === "developer" ? "dev" : "") + '">' + esc(u.plan) + "</span></td>" +
+      "<td>" + (u.status === "active"
+        ? '<span class="chip ok">正常</span>'
+        : '<span class="chip banned">' + esc(u.status) + "</span>") +
+        (risk ? ' <span class="chip risk">⚠ ' + risk + "</span>" : "") + "</td>" +
+      '<td class="num">' + esc(usd(used)) +
+        (cap > 0 ? ' <span class="bar-track"><span class="bar-fill ' + cls + '" style="width:' + (pct * 100).toFixed(0) + '%"></span></span>' : "") + "</td>" +
+      '<td class="num">' + esc(u.used_requests || 0) + " / " + esc(u.quota_requests || 0) + "</td>" +
+      '<td class="num">' + esc(u.chars_week || 0) + "</td>" +
+      '<td class="num">' + esc(u.lecture_minutes_month || 0) + " 分</td>" +
+      "<td>" + esc(when(u.last_seen)) + "</td>" +
+      '<td class="muted">›</td></tr>';
+  }).join("");
+
+  $("users").innerHTML = head + "<tbody>" + (body || '<tr><td colspan="9" class="muted">没有匹配的用户</td></tr>') + "</tbody>";
+
+  Array.prototype.forEach.call($("users").querySelectorAll("th.sortable"), function (th) {
+    th.onclick = function () {
+      var k = th.getAttribute("data-k");
+      if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
+      renderUsers();
+    };
+  });
+  Array.prototype.forEach.call($("users").querySelectorAll("tr.clickable"), function (tr) {
+    tr.onclick = function () { openDrawer(tr.getAttribute("data-id")); };
+  });
+}
+
+$("q").oninput = function () { query = this.value.trim(); renderUsers(); };
+Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (b) {
+  b.onclick = function () {
+    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (x) { x.classList.remove("on"); });
+    b.classList.add("on"); filter = b.getAttribute("data-f"); renderUsers();
+  };
+});
+
+// ── 用户抽屉:详情 + 写操作 ───────────────────────
+function openDrawer(id) {
+  var u = (DATA.users || []).filter(function (x) { return x.user_id === id; })[0];
+  if (!u) return;
+  var cap = Number(u.quota_micro || 0);
+  function kv(k, v) { return '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v">' + v + "</span></div>"; }
+
+  $("drawer").innerHTML =
+    '<div class="row" style="justify-content:space-between;margin-bottom:14px">' +
+      "<h3>" + esc(u.email) + "</h3>" +
+      '<button class="linkbtn" onclick="closeDrawer()">关闭</button></div>' +
+
+    kv("用户 id", '<span class="mono">' + esc(u.user_id) + "</span>") +
+    kv("档位", esc(u.plan) + (u.subscription ? ' <span class="muted">(' + esc(u.subscription) + ")</span>" : "")) +
+    kv("状态", u.status === "active" ? '<span class="chip ok">正常</span>' : '<span class="chip banned">' + esc(u.status) + "</span>") +
+    kv("加入", esc(new Date(u.joined).toLocaleDateString("zh-CN"))) +
+    kv("最后活动", esc(when(u.last_seen))) +
+    kv("本月花费", esc(usd(u.used_micro)) + (cap ? " / " + esc(usd(cap)) : "")) +
+    kv("本月请求", esc(u.used_requests || 0) + " / " + esc(u.quota_requests || 0)) +
+    kv("本周字数", esc(u.chars_week || 0)) +
+    kv("本月长录音", esc(u.lecture_minutes_month || 0) + " 分钟") +
+    kv("签发通行证", esc(u.leases_total || 0) + " 次") +
+    kv("其中没结算", (u.leases_unsettled >= 3 ? '<span class="chip risk">' : "<span>") + esc(u.leases_unsettled || 0) + " 次</span>") +
+    kv("结算报零用量", (u.settle_zero >= 3 ? '<span class="chip risk">' : "<span>") + esc(u.settle_zero || 0) + " 次</span>") +
+
+    '<div class="act"><h4>封禁</h4>' +
+      '<input id="banReason" type="text" placeholder="理由(必填 —— 三个月后翻记录时只剩它)">' +
+      '<div class="row">' +
+        (u.status === "active"
+          ? '<button class="btn danger" onclick="doAction(\'ban\',\'' + esc(u.user_id) + '\')">封禁</button>'
+          : '<button class="btn" onclick="doAction(\'unban\',\'' + esc(u.user_id) + '\')">解封</button>') +
+      "</div>" +
+      '<p class="note">封禁立刻生效于所有接口 —— 鉴权那一层本来就在查这个状态。</p>' +
+    "</div>" +
+
+    '<div class="act"><h4>单独加额度(小灶)</h4>' +
+      '<input id="qMicro" type="number" min="0" step="100000" value="' + esc(cap) + '" placeholder="微美元">' +
+      '<input id="qReq" type="number" min="0" step="100" value="' + esc(u.quota_requests || 0) + '" placeholder="请求数">' +
+      '<input id="qReason" type="text" placeholder="理由">' +
+      '<button class="btn quiet" onclick="doAction(\'set_quota\',\'' + esc(u.user_id) + '\')">保存</button>' +
+      '<p class="note">这是<b>往上加</b>的口子。花钱闸取「档位帽 vs 这里」更宽松的那个,' +
+        "所以调低它压不下付费用户的天花板 —— 要降档请改下面的档位。</p>" +
+    "</div>" +
+
+    '<div class="act"><h4>手动给/收档位</h4>' +
+      '<select id="pPlan"><option value="free">free(收回)</option>' +
+        '<option value="pro">pro</option><option value="developer">developer</option></select>' +
+      '<input id="pMonths" type="number" min="0" step="1" value="0" placeholder="几个月(0 = 不设到期)">' +
+      '<input id="pReason" type="text" placeholder="理由">' +
+      '<button class="btn quiet" onclick="doAction(\'set_plan\',\'' + esc(u.user_id) + '\')">应用</button>' +
+      '<p class="note">走订阅表、来源标 manual —— Stripe 的一次退订不会顺手把手动给的档压掉。</p>' +
+    "</div>" +
+
+    '<div id="drawerMsg"></div>';
+
+  $("drawer").style.display = "block";
+  $("scrim").style.display = "block";
+}
+function closeDrawer() { $("drawer").style.display = "none"; $("scrim").style.display = "none"; }
+$("scrim").onclick = closeDrawer;
+document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
+
+function doAction(action, userId) {
+  var body = { action: action, user_id: userId };
+  if (action === "ban") { body.status = "banned"; body.reason = ($("banReason") || {}).value || ""; }
+  if (action === "unban") { body.status = "active"; body.reason = ($("banReason") || {}).value || "解封"; }
+  if (action === "set_quota") {
+    body.micro = Number(($("qMicro") || {}).value || 0);
+    body.requests = Number(($("qReq") || {}).value || 0);
+    body.reason = ($("qReason") || {}).value || "";
+  }
+  if (action === "set_plan") {
+    body.plan = ($("pPlan") || {}).value;
+    body.months = Number(($("pMonths") || {}).value || 0);
+    body.reason = ($("pReason") || {}).value || "";
+  }
+  $("drawerMsg").innerHTML = '<p class="note">执行中…</p>';
+  fetch(API + "/admin/action", { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || (res.j && res.j.ok === false)) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("drawerMsg").innerHTML = '<p class="err">' + esc(m) + "</p>";
+        return;
+      }
+      $("drawerMsg").innerHTML = '<p class="okmsg">done。正在刷新…</p>';
+      closeDrawer(); load();
+    })
+    .catch(function (e) { $("drawerMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+// ── 功能使用 ──────────────────────────────────────
+var FEAT_NAME = { dictation: "听写", polish: "整理", ask: "随心问", lecture: "长录音" };
+var FEAT_COLOR = { dictation: "var(--coral)", polish: "var(--llm)", ask: "var(--green)", lecture: "var(--warn)" };
+
+function renderFeatures(totals, daily) {
+  if (!totals.length) {
+    $("featRank").innerHTML = '<p class="muted">30 天内还没有经过服务器的功能使用。</p>';
+  } else {
+    var max = Math.max.apply(null, totals.map(function (t) { return Number(t.count); }));
+    $("featRank").innerHTML = totals.map(function (t) {
+      var w = max > 0 ? (Number(t.count) / max * 100) : 0;
+      return '<div class="rank-row">' +
+        "<span>" + esc(FEAT_NAME[t.feature] || t.feature) + "</span>" +
+        '<span class="rank-bar" style="width:' + w.toFixed(1) + "%;background:" + (FEAT_COLOR[t.feature] || "var(--coral)") + '"></span>' +
+        '<span class="n">' + esc(t.count) + " 次 · " + esc(t.users) + " 人</span></div>";
     }).join("");
-    $("users").innerHTML = "<table><thead><tr><th>邮箱</th><th>档位</th><th>本月已用</th><th>请求</th><th>最后活动</th></tr></thead><tbody>" + rows + "</tbody></table>";
   }
+  drawFeatChart(daily);
+}
 
-  function drawHealth(rows, serverTime, version) {
-    var html = rows.map(function (p) {
-      var warn = (p.note || "").indexOf("占位") >= 0;
-      return '<div class="health-row"><span class="k">' + esc(p.key) + " = " + esc(p.micros_per_unit) + "</span>" +
-        '<span class="' + (warn ? "warnnote" : "muted") + '" style="text-align:right">' + esc(p.note || "") + "</span></div>";
-    }).join("");
-    html += '<div class="health-row"><span class="k">server</span><span class="muted">' +
-      (version ? "函数 v" + esc(version) + " · " : "") + esc(serverTime || "") + "</span></div>";
-    $("health").innerHTML = html;
+// 每天各功能次数:堆叠柱。手写 SVG,不引任何图表库(零依赖是这个页面的纪律)
+function drawFeatChart(rows) {
+  var svg = $("featChart"), tip = $("featTip");
+  var W = svg.clientWidth || 600, H = 150, PAD = 22;
+  var days = [], byDay = {};
+  rows.forEach(function (r) {
+    if (!byDay[r.day]) { byDay[r.day] = {}; days.push(r.day); }
+    byDay[r.day][r.feature] = Number(r.count);
+  });
+  days.sort();
+  var kinds = ["dictation", "polish", "ask", "lecture"];
+  $("featLegend").innerHTML = kinds.map(function (k) {
+    return '<span><i class="key" style="background:' + FEAT_COLOR[k] + '"></i>' + FEAT_NAME[k] + "</span>";
+  }).join("");
+  if (!days.length) { svg.innerHTML = '<text x="10" y="24" fill="var(--faint)" font-size="12">还没有数据</text>'; return; }
+
+  var maxTotal = 1;
+  days.forEach(function (d) {
+    var s = kinds.reduce(function (a, k) { return a + (byDay[d][k] || 0); }, 0);
+    if (s > maxTotal) maxTotal = s;
+  });
+  var bw = Math.max(2, (W - PAD * 2) / days.length - 2);
+  var out = "";
+  days.forEach(function (d, i) {
+    var x = PAD + i * ((W - PAD * 2) / days.length);
+    var y = H - PAD;
+    kinds.forEach(function (k) {
+      var v = byDay[d][k] || 0;
+      if (!v) return;
+      var h = (v / maxTotal) * (H - PAD * 2);
+      y -= h;
+      out += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+             '" height="' + h.toFixed(1) + '" fill="' + FEAT_COLOR[k] + '" opacity=".85" rx="1"></rect>';
+    });
+  });
+  out += '<text x="' + PAD + '" y="' + (H - 4) + '" fill="var(--faint)" font-size="10">' + days[0] + "</text>";
+  out += '<text x="' + (W - PAD) + '" y="' + (H - 4) + '" fill="var(--faint)" font-size="10" text-anchor="end">' + days[days.length - 1] + "</text>";
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.innerHTML = out;
+
+  svg.onmousemove = function (e) {
+    var rect = svg.getBoundingClientRect();
+    var i = Math.floor((e.clientX - rect.left - PAD) / ((W - PAD * 2) / days.length));
+    if (i < 0 || i >= days.length) { tip.style.display = "none"; return; }
+    var d = days[i], lines = [d];
+    kinds.forEach(function (k) { if (byDay[d][k]) lines.push(FEAT_NAME[k] + " " + byDay[d][k] + " 次"); });
+    tip.textContent = lines.join("\n");
+    tip.style.left = (e.clientX - rect.left) + "px";
+    tip.style.top = (e.clientY - rect.top) + "px";
+    tip.style.display = "block";
+  };
+  svg.onmouseleave = function () { tip.style.display = "none"; };
+}
+
+// ── 每日花费(双系列)─────────────────────────────
+function drawLine(pts, W, H, PAD, max, color) {
+  if (pts.length < 2) return "";
+  var d = pts.map(function (p, i) {
+    var x = PAD + (i / (pts.length - 1)) * (W - PAD * 2);
+    var y = H - PAD - (p / max) * (H - PAD * 2);
+    return (i ? "L" : "M") + x.toFixed(1) + "," + y.toFixed(1);
+  }).join(" ");
+  return '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round"></path>';
+}
+
+function renderDaily(rows) {
+  var svg = $("dailyChart"), tip = $("dailyTip");
+  var W = svg.clientWidth || 500, H = 170, PAD = 20;
+  if (!rows.length) { svg.innerHTML = '<text x="10" y="24" fill="var(--faint)" font-size="12">还没有数据</text>'; return; }
+  var asr = rows.map(function (r) { return Number(r.asr_micro || 0); });
+  var llm = rows.map(function (r) { return Number(r.llm_micro || 0); });
+  var max = Math.max(1, Math.max.apply(null, asr.concat(llm)));
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.innerHTML =
+    '<line x1="' + PAD + '" y1="' + (H - PAD) + '" x2="' + (W - PAD) + '" y2="' + (H - PAD) + '" stroke="var(--line)"></line>' +
+    drawLine(asr, W, H, PAD, max, "var(--asr)") +
+    drawLine(llm, W, H, PAD, max, "var(--llm)") +
+    '<text x="' + PAD + '" y="14" fill="var(--faint)" font-size="10">峰值 ' + usd(max) + "</text>";
+
+  svg.onmousemove = function (e) {
+    var rect = svg.getBoundingClientRect();
+    var i = Math.round((e.clientX - rect.left - PAD) / (W - PAD * 2) * (rows.length - 1));
+    if (i < 0 || i >= rows.length) { tip.style.display = "none"; return; }
+    var r = rows[i];
+    tip.textContent = r.day + "\n识别 " + usd(r.asr_micro) + "\n大模型 " + usd(r.llm_micro) +
+                      "\n" + (r.requests || 0) + " 次 · " + (r.active_users || 0) + " 人";
+    tip.style.left = (e.clientX - rect.left) + "px";
+    tip.style.top = (e.clientY - rect.top) + "px";
+    tip.style.display = "block";
+  };
+  svg.onmouseleave = function () { tip.style.display = "none"; };
+}
+
+// ── 上游 API ──────────────────────────────────────
+function renderUpstream(d) {
+  var a = d.apis || {};
+  var out = "";
+  function row(k, v, warn) {
+    return '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v' + (warn ? " err" : "") + '">' + v + "</span></div>";
   }
+  var ds = a.deepseek || {};
+  if (!ds.configured) out += row("DeepSeek", '<span class="muted">没配 Key</span>', true);
+  else if (!ds.ok) out += row("DeepSeek", esc(ds.detail || "探测失败"), true);
+  else out += row("DeepSeek 余额", (ds.balances || []).map(function (b) { return esc(b.total + " " + b.currency); }).join(" · ") || "—");
 
-  function boot() { loadStats(false); }
-  boot();
-})();
+  var sx = a.soniox || {};
+  if (!sx.configured) out += row("Soniox", '<span class="muted">没配 Key</span>', true);
+  else if (!sx.ok) out += row("Soniox", esc(sx.detail || "探测失败"), true);
+  else {
+    out += row("Soniox 本月", "$" + Number(sx.month_cost_usd || 0).toFixed(4));
+    (sx.models || []).forEach(function (m) {
+      out += row("　" + m.model, esc(m.requests + " 次 · " + m.audio_minutes + " 分钟 · $" + Number(m.cost_usd).toFixed(4)));
+    });
+  }
+  out += row("用量对账水位", '<span class="mono">' + esc(when(d.reconcile_watermark)) + "</span>");
+  out += '<div class="row" style="margin-top:12px">' +
+         '<button class="btn quiet" onclick="reconcile(0)">试算(不动账)</button>' +
+         '<button class="btn quiet" onclick="reconcile(1)">应用</button></div>' +
+         '<p class="note">不信客户端自报,直接问 Soniox 那一单实际处理了多少音频。' +
+         '日常在报账那条路上自己跑(至少隔 10 分钟一次),这两个按钮是排障用的。</p>' +
+         '<div id="recMsg"></div>';
+  $("upstream").innerHTML = out;
+}
+
+// ── 用量对账 ──────────────────────────────────────
+function reconcile(apply) {
+  $("recMsg").innerHTML = '<p class="note">跑对账中…(要翻 Soniox 的用量日志,可能几秒)</p>';
+  // 试算回看 30 天 —— 排障要看的窗口和水位无关
+  var url = API + "/asr/reconcile?" + (apply ? "apply=1" : "days=30");
+  fetch(url, { method: "POST", headers: authHeaders() })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.detail)) || "没跑通";
+        $("recMsg").innerHTML = '<p class="err">' + esc(m) + "</p>";
+        return;
+      }
+      var j = res.j;
+      var lines = [
+        "窗口 " + String(j.window.start).slice(0, 16) + " → " + String(j.window.end).slice(0, 16),
+        "Soniox 日志 " + j.logs_total + " 条,其中贴了我们标的 " + j.logs_ours + " 条",
+        (apply ? "已调账 " : "会调账 ") + j.adjusted + " 笔"
+      ];
+      if (j.adjustments && j.adjustments.length) {
+        lines.push("");
+        j.adjustments.slice(0, 10).forEach(function (a) {
+          lines.push("  " + a.lease.slice(0, 8) + "…  真实 " + usd(a.true_micro) +
+                     (apply ? "  调整 " + (a.delta > 0 ? "+" : "") + usd(a.delta) : ""));
+        });
+      }
+      $("recMsg").innerHTML = '<pre class="note" style="white-space:pre-wrap;margin-top:8px">' +
+                              esc(lines.join("\n")) + "</pre>";
+      if (apply) load();
+    })
+    .catch(function (e) { $("recMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+// ── 档位 / 留痕 ───────────────────────────────────
+function renderPlans(plans) {
+  $("plans").innerHTML =
+    "<thead><tr><th>档位</th><th class='num'>周字数</th><th class='num'>长录音</th><th class='num'>成本帽</th><th class='num'>月价</th></tr></thead><tbody>" +
+    plans.map(function (p) {
+      return "<tr><td>" + esc(p.name) + ' <span class="muted mono">' + esc(p.key) + "</span></td>" +
+        '<td class="num">' + (p.weekly_chars == null ? "不限" : esc(p.weekly_chars)) + "</td>" +
+        '<td class="num">' + (p.lecture_minutes == null ? "不限" : esc(p.lecture_minutes) + " 分") + "</td>" +
+        '<td class="num">' + (p.cost_cap_micro == null ? "不限" : esc(usd(p.cost_cap_micro))) + "</td>" +
+        '<td class="num">' + (p.price_cents ? "AU$" + (p.price_cents / 100).toFixed(2) : "—") + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+function renderAudit(rows) {
+  if (!rows.length) { $("audit").innerHTML = '<tbody><tr><td class="muted">还没有后台操作。</td></tr></tbody>'; return; }
+  $("audit").innerHTML =
+    "<thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>变化</th><th>理由</th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      var chg = "";
+      try {
+        var b = r.before || {}, a2 = r.after || {};
+        chg = Object.keys(a2).map(function (k) { return k + ": " + (b[k] == null ? "—" : b[k]) + " → " + a2[k]; }).join("; ");
+      } catch (e) {}
+      return "<tr><td>" + esc(when(r.at)) + "</td><td>" + esc(r.actor) + "</td>" +
+        "<td>" + esc(r.action) + "</td><td>" + esc(r.target || "—") + "</td>" +
+        '<td class="mono">' + esc(chg) + "</td><td>" + esc(r.reason || "—") + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+window.addEventListener("resize", function () {
+  if (DATA) { drawFeatChart(DATA.features || []); renderDaily(DATA.daily || []); }
+});
+
+boot();
 </script>
 </body>
 </html>
