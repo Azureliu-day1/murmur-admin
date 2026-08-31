@@ -312,6 +312,11 @@ input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px
     </div>
 
     <div class="section">
+      <div class="eyebrow">probe · <b>有人在试码吗</b></div>
+      <div class="card"><div id="probe"></div></div>
+    </div>
+
+    <div class="section">
       <div class="eyebrow">codes · <b>发出去的邀请码</b></div>
       <div class="card"><div class="tablebox"><table id="invites"></table></div></div>
     </div>
@@ -471,6 +476,7 @@ function render() {
   renderPlans(d.plans || []);
   renderAudit(d.audit || []);
   renderInvites(d.invites || []);
+  renderProbe(d.invite_attempts);
 }
 
 // ── 异常信号 ──────────────────────────────────────
@@ -955,18 +961,65 @@ function renderInvites(rows) {
     return;
   }
   $("invites").innerHTML =
-    "<thead><tr><th>码</th><th>用量</th><th>过期</th><th>备注</th><th>铸于</th></tr></thead><tbody>" +
+    "<thead><tr><th>码</th><th>用量</th><th>过期</th><th>备注</th><th>谁换走的</th><th></th></tr></thead><tbody>" +
     rows.map(function (r) {
       var used = r.used + " / " + r.max_uses;
+      var dead = r.revoked_at || (r.expires_at && new Date(r.expires_at) < new Date())
+                 || r.used >= r.max_uses;
       var state = r.revoked_at ? "已作废"
         : (r.expires_at && new Date(r.expires_at) < new Date()) ? "已过期"
         : (r.used >= r.max_uses) ? "用完了" : "可用";
+      // 谁换走的 —— 「这张码放进来的都是谁」以前完全看不见
+      var who = (r.claimed_by || []).map(function (c) { return esc(c.email); }).join("<br>") || '<span class="muted">—</span>';
+      // 作废只对还活着的码给按钮:已经废了/用完了/过期了的再点没有意义
+      var act = dead ? "" :
+        '<button class="btn quiet" onclick="revokeInvite(\'' + esc(r.hash) + '\',\'' + esc(r.prefix) + '\')">作废</button>';
       return "<tr><td><code>" + esc(r.prefix) + "…</code></td>" +
         "<td>" + esc(used) + " · " + esc(state) + "</td>" +
         "<td>" + esc(r.expires_at ? r.expires_at.slice(0, 10) : "永不") + "</td>" +
         "<td>" + esc(r.note || "") + "</td>" +
-        "<td>" + esc((r.created_at || "").slice(0, 10)) + "</td></tr>";
+        "<td style=\"font-size:12px\">" + who + "</td>" +
+        "<td>" + act + "</td></tr>";
     }).join("") + "</tbody>";
+}
+
+/// 作废一张码。⚠️ 这是**止血不是追溯** —— 已经用它换走名额的人不受影响,
+/// 那些要单独封禁(封禁有它自己的理由字段和审计条目)。
+function revokeInvite(hash, prefix) {
+  var reason = prompt("作废 " + prefix + "…\n\n为什么废?(三个月后翻审计表时,这是唯一救得回来的信息)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("作废要写理由"); return; }
+  fetch(API + "/admin/action", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ action: "revoke_invite", hash: hash, reason: reason.trim() })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        alert((res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功"); return;
+      }
+      alert("已作废。这张码之前已经换走 " + (res.j.already_used || 0) +
+            " 个名额 —— 那些人不受影响,要收回得单独封禁。");
+      load();
+    })
+    .catch(function (e) { alert(e.message); });
+}
+
+/// 有人在探码 —— 这块以前完全看不见
+function renderProbe(p) {
+  if (!p) { $("probe").innerHTML = '<p class="note">没有数据。</p>'; return; }
+  var sus = p.suspicious || [];
+  var html = '<p class="note">过去 24 小时:兑换尝试 <b>' + (p.last_24h || 0) +
+             '</b> 次,其中失败 <b>' + (p.failed_24h || 0) + '</b> 次。</p>';
+  if (!sus.length) {
+    html += '<p class="note">没有可疑 IP(同一个 IP 24 小时内失败 ≥5 次才会列在这)。</p>';
+  } else {
+    html += '<div class="tablebox"><table><thead><tr><th>IP</th><th>失败次数</th><th>最近一次</th></tr></thead><tbody>' +
+      sus.map(function (r) {
+        return "<tr><td><code>" + esc(r.ip) + "</code></td><td>" + esc(r.fails) +
+               "</td><td>" + esc((r.last || "").slice(0, 16).replace("T", " ")) + "</td></tr>";
+      }).join("") + "</tbody></table></div>";
+  }
+  $("probe").innerHTML = html;
 }
 
 </script>
