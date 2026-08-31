@@ -287,6 +287,34 @@ input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px
       </div>
     </div>
 
+
+    <!-- ── 邀请:开座 + 铸码(2026-08-31)────────────────────────────── -->
+    <div class="section grid g2">
+      <div class="card">
+        <div class="eyebrow">seat · <b>给一个人开名额</b></div>
+        <p class="note">填邮箱就行。没有账号会替他建一个,然后发一封「名额开好了」的信。
+          他之后正常登录即可 —— 已经有名额的人再开一次不会重复,只会把封禁/暂停解回来。</p>
+        <input id="seatEmail" type="email" placeholder="someone@example.com" autocomplete="off">
+        <input id="seatReason" type="text" placeholder="备注(可留空):谁介绍的 / 为什么给">
+        <button class="btn" onclick="grantSeat()">开名额</button>
+        <div id="seatMsg"></div>
+      </div>
+      <div class="card">
+        <div class="eyebrow">invite · <b>铸一张邀请码</b></div>
+        <p class="note">可以线下发 —— 拿到码的人自己就能开通,不用你在场。
+          ⚠️ <b>明文只显示这一次</b>,关掉就再也取不回来(库里只有哈希)。</p>
+        <input id="invUses" type="number" min="1" max="500" value="1" placeholder="能用几次">
+        <input id="invDays" type="number" min="0" max="365" value="30" placeholder="几天后过期(0 = 永不)">
+        <input id="invNote" type="text" placeholder="备注:发给谁 / 什么场合">
+        <button class="btn" onclick="mintInvite()">铸码</button>
+        <div id="invMsg"></div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="eyebrow">codes · <b>发出去的邀请码</b></div>
+      <div class="card"><div class="tablebox"><table id="invites"></table></div></div>
+    </div>
     <div class="section">
       <div class="eyebrow">audit · <b>后台操作留痕</b></div>
       <div class="card"><div class="tablebox"><table id="audit"></table></div></div>
@@ -442,6 +470,7 @@ function render() {
   renderUpstream(d);
   renderPlans(d.plans || []);
   renderAudit(d.audit || []);
+  renderInvites(d.invites || []);
 }
 
 // ── 异常信号 ──────────────────────────────────────
@@ -872,6 +901,74 @@ window.addEventListener("resize", function () {
 });
 
 boot();
+
+// ── 邀请:开座 + 铸码(2026-08-31)────────────────────────────────────
+function grantSeat() {
+  var email = ($("seatEmail").value || "").trim();
+  if (!email) { $("seatMsg").innerHTML = '<p class="err">把邮箱填上</p>'; return; }
+  $("seatMsg").innerHTML = '<p class="note">开着…</p>';
+  fetch(API + "/admin/action", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ action: "grant_seat", email: email,
+                           reason: ($("seatReason").value || "").trim() })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("seatMsg").innerHTML = '<p class="err">' + esc(m) + "</p>"; return;
+      }
+      $("seatMsg").innerHTML = '<p class="okmsg">' + esc(res.j.email) +
+        (res.j.existed ? " 本来就有名额,已确保是 active" : " 的名额开好了,信也发出去了") + "</p>";
+      $("seatEmail").value = ""; $("seatReason").value = "";
+      load();
+    })
+    .catch(function (e) { $("seatMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+function mintInvite() {
+  $("invMsg").innerHTML = '<p class="note">铸着…</p>';
+  fetch(API + "/admin/action", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ action: "mint_invite",
+                           max_uses: Number($("invUses").value || 1),
+                           days: Number($("invDays").value || 0),
+                           note: ($("invNote").value || "").trim() })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("invMsg").innerHTML = '<p class="err">' + esc(m) + "</p>"; return;
+      }
+      // ⚠️ 明文只此一次 —— 给个大字号、可以整段选,并且明说关掉就没了
+      $("invMsg").innerHTML =
+        '<p class="okmsg">铸好了。<b>这串只显示这一次</b>,现在就复制走:</p>' +
+        '<p style="font-size:20px;font-family:ui-monospace,monospace;user-select:all;' +
+        'padding:10px;border:1px dashed currentColor;border-radius:8px">' + esc(res.j.code) + "</p>";
+      load();
+    })
+    .catch(function (e) { $("invMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+function renderInvites(rows) {
+  if (!rows.length) {
+    $("invites").innerHTML = '<tbody><tr><td class="muted">还没铸过邀请码。</td></tr></tbody>';
+    return;
+  }
+  $("invites").innerHTML =
+    "<thead><tr><th>码</th><th>用量</th><th>过期</th><th>备注</th><th>铸于</th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      var used = r.used + " / " + r.max_uses;
+      var state = r.revoked_at ? "已作废"
+        : (r.expires_at && new Date(r.expires_at) < new Date()) ? "已过期"
+        : (r.used >= r.max_uses) ? "用完了" : "可用";
+      return "<tr><td><code>" + esc(r.prefix) + "…</code></td>" +
+        "<td>" + esc(used) + " · " + esc(state) + "</td>" +
+        "<td>" + esc(r.expires_at ? r.expires_at.slice(0, 10) : "永不") + "</td>" +
+        "<td>" + esc(r.note || "") + "</td>" +
+        "<td>" + esc((r.created_at || "").slice(0, 10)) + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
 </script>
 </body>
 </html>
