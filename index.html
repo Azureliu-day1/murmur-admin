@@ -923,8 +923,24 @@ function grantSeat() {
         var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
         $("seatMsg").innerHTML = '<p class="err">' + esc(m) + "</p>"; return;
       }
-      $("seatMsg").innerHTML = '<p class="okmsg">' + esc(res.j.email) +
-        (res.j.existed ? " 本来就有名额,已确保是 active" : " 的名额开好了,信也发出去了") + "</p>";
+      // ⛔ 别再无条件说「信也发出去了」。服务端如实回 mailed(index.ts grant_seat 那支),
+      //    这里以前不读它 —— 于是信一封没发,页面照样说发了,人就静悄悄掉了。
+      // ⚠️ 而且 mailed:true 也只代表 Resend **收下了**,不代表送到:2026-09-11 实测
+      //    同一条路上多封信 HTTP 200 + id 却从没进收件箱(发信域没有投递信誉,查不到日志)。
+      //    所以即使 true 也要提醒管理员自己再通知一声 —— 开座这条路没有第二个触达手段。
+      var seatWho = esc(res.j.email);
+      var seatMsg;
+      if (res.j.existed) {
+        seatMsg = '<p class="okmsg">' + seatWho + ' 本来就有名额,已确保是 active</p>';
+      } else if (res.j.mailed === false) {
+        seatMsg = '<p class="okmsg">' + seatWho + ' 的名额开好了。</p>' +
+                  '<p class="err">但通知信<b>没发出去</b> —— 他不会知道,你得自己告诉他。</p>';
+      } else {
+        seatMsg = '<p class="okmsg">' + seatWho + ' 的名额开好了,通知信已提交给邮件服务。</p>' +
+                  '<p class="note">⚠️ 提交成功不等于送达(这条路目前投递不稳)。' +
+                  '稳妥起见自己也说一声:让他打开 Murmur → 登录 → 填这个邮箱,验证码那封信是可靠的。</p>';
+      }
+      $("seatMsg").innerHTML = seatMsg;
       $("seatEmail").value = ""; $("seatReason").value = "";
       load();
     })
