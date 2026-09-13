@@ -181,6 +181,9 @@ input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px
 .gate h2 { font: 600 19px/1.3 Georgia, "Songti SC", serif; margin-bottom: 4px; }
 .hidden { display: none !important; }
 @media (max-width: 640px) { .wrap { padding: 18px 14px 60px; } .stat .num { font-size: 22px; } }
+table.mini{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
+table.mini th,table.mini td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line,#e6e6e6);vertical-align:top}
+table.mini tr.bad td{color:#b0392a}
 </style>
 </head>
 <body>
@@ -554,7 +557,8 @@ function renderUsers() {
     ["email", "邮箱", ""], ["plan", "档位", ""], ["status", "状态", ""],
     ["used_micro", "本月花费", "num"], ["used_requests", "请求", "num"],
     ["chars_week", "本周字数", "num"], ["lecture_minutes_month", "长录音", "num"],
-    ["last_seen", "最后活动", ""]
+    ["last_seen", "最后活动", ""],
+    ["last_login", "最后登录", ""]
   ];
   var head = "<thead><tr>" + cols.map(function (c) {
     var arrow = sortKey === c[0] ? '<span class="arrow">' + (sortDir < 0 ? "▼" : "▲") + "</span>" : "";
@@ -580,6 +584,7 @@ function renderUsers() {
       '<td class="num">' + esc(u.chars_week || 0) + "</td>" +
       '<td class="num">' + esc(u.lecture_minutes_month || 0) + " 分</td>" +
       "<td>" + esc(when(u.last_seen)) + "</td>" +
+      "<td>" + esc(when(u.last_login)) + "</td>" +
       '<td class="muted">›</td></tr>';
   }).join("");
 
@@ -622,6 +627,7 @@ function openDrawer(id) {
     kv("状态", u.status === "active" ? '<span class="chip ok">正常</span>' : '<span class="chip banned">' + esc(u.status) + "</span>") +
     kv("加入", esc(new Date(u.joined).toLocaleDateString("zh-CN"))) +
     kv("最后活动", esc(when(u.last_seen))) +
+    kv("最后登录", esc(when(u.last_login))) +
     kv("本月花费", esc(usd(u.used_micro)) + (cap ? " / " + esc(usd(cap)) : "")) +
     kv("本月请求", esc(u.used_requests || 0) + " / " + esc(u.quota_requests || 0)) +
     kv("本周字数", esc(u.chars_week || 0)) +
@@ -1034,6 +1040,19 @@ function renderProbe(p) {
         return "<tr><td><code>" + esc(r.ip) + "</code></td><td>" + esc(r.fails) +
                "</td><td>" + esc((r.last || "").slice(0, 16).replace("T", " ")) + "</td></tr>";
       }).join("") + "</tbody></table></div>";
+  }
+  // 2026-09-13:24 小时计数会归零,底表逐条才是「谁码填错了、谁想蹭」的答案
+  var rec = p.recent || [];
+  if (rec.length) {
+    html += '<table class="mini"><thead><tr><th>时间</th><th>邮箱</th><th>码前缀</th><th>结果</th><th>IP</th></tr></thead><tbody>';
+    rec.forEach(function (r) {
+      var bad = r.outcome !== "ok" && r.outcome !== "ok_nomail";
+      html += "<tr" + (bad ? ' class="bad"' : "") + "><td>" + esc(when(r.at)) + "</td><td>" + esc(r.email || "—") +
+              "</td><td>" + esc(r.prefix || "—") + "</td><td>" + esc(r.outcome) + "</td><td>" + esc(r.ip || "—") + "</td></tr>";
+    });
+    html += "</tbody></table>";
+  } else {
+    html += '<p class="note">还没有任何兑换尝试。</p>';
   }
   $("probe").innerHTML = html;
 }
