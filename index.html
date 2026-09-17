@@ -193,6 +193,45 @@ input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px
 .gate h2 { font: 600 19px/1.3 Georgia, "Songti SC", serif; margin-bottom: 4px; }
 .hidden { display: none !important; }
 @media (max-width: 640px) { .wrap { padding: 18px 14px 60px; } .stat .num { font-size: 22px; } }
+
+/* ── 后台 v2(2026-09-17):生命周期 / 警报降噪 / 手机宽度 ─────────────
+   这一页原来是**账本视图**:每个人有花了多少、签了几把 key。缺的是创始人真正
+   要看的那件事 —— 这个人从哪来、走到哪一步。下面三组样式各对应一件:
+   .tl-*(抽屉里的时间线)、.calmcard/.hint(对上账的警报不再飘红、每条说人话)、
+   ≤520px(手机上能看)。 */
+.src { font-size: 11px; margin-top: 1px; white-space: nowrap; }
+.alarm-row .hint { flex: 1 0 100%; font-size: 11.5px; color: var(--second); line-height: 1.6; }
+.calmcard { background: var(--sunk); border-color: var(--line); margin-top: 10px; }
+.calmcard .calmhead { font-size: 11.5px; color: var(--faint); margin-bottom: 4px; }
+.calmcard .alarm-row .sig { font-weight: 500; color: var(--second); }
+
+.tl-row { display: grid; grid-template-columns: 72px 1fr auto; gap: 10px; align-items: baseline;
+          padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.tl-row:last-child { border-bottom: none; }
+.tl-row .step { color: var(--faint); }
+.tl-row .day { color: var(--faint); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+.tl-sum { font-size: 12.5px; color: var(--second); margin-top: 12px; line-height: 1.7; }
+
+/* 手机:一屏宽 390。⛔ 不是把表横着滚 —— 要能一眼扫完,所以次要列直接不画。 */
+@media (max-width: 520px) {
+  .wrap { padding: 16px 12px 56px; }
+  .topbar { gap: 8px 12px; margin-bottom: 18px; }
+  /* 第一行 = 品牌 + 待处理角标;第二行 = 账号 / 刷新 / 退出 */
+  .who { flex: 1 0 100%; justify-content: flex-start; gap: 12px; }
+  .g6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat .num { font-size: 20px; }
+  .mob-hide { display: none !important; }
+  .card { padding: 14px 12px; }
+  /* 表在手机上要**能扫完**,不是能横着滚。所以:字小一号、留白收紧、
+     长邮箱允许硬断行(不断的话它一个人就把整张表撑出屏幕,后面五列全滚没了)。 */
+  table { font-size: 12px; }
+  td { padding: 8px 4px; font-size: 12px; }
+  th { padding: 4px 4px 7px; }
+  .mono { font-size: 11px; }
+  #users td:first-child, #accessTable td.mono { word-break: break-all; }
+  .chip { padding: 1px 6px; }
+  .filters input[type=text] { width: 100%; }
+}
 table.mini{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
 table.mini th,table.mini td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line,#e6e6e6);vertical-align:top}
 table.mini tr.bad td{color:#b0392a}
@@ -239,7 +278,9 @@ table.mini tr.bad td{color:#b0392a}
     <!-- 异常信号置顶:最该看见的东西不能排在第三屏 -->
     <div class="section hidden" id="alarmSec">
       <div class="eyebrow">alerts · <b>需要你看一眼的</b></div>
-      <div class="card alarm" id="alarms"></div>
+      <div class="card alarm hidden" id="alarms"></div>
+      <!-- 对账已经清零的那些:不删,但也不该用「出事了」的颜色喊 -->
+      <div class="card calmcard hidden" id="alarmsCalm"></div>
     </div>
 
     <div class="section">
@@ -521,20 +562,62 @@ function renderAlarms(list) {
   // 待认领订单也是「钱收了还没落到人头上」,和异常同等级别,放一起
   (DATA.pending_purchases || []).forEach(function (p) {
     extra.push({ severity: "medium", signal: "网站订单还没被认领",
-      email: p.email, detail: "订阅号 " + p.external_ref + ",这个邮箱还没在 App 里登录过" });
+      email: p.email, detail: "订阅号 " + p.external_ref + ",这个邮箱还没在 App 里登录过",
+      hint: "钱收了、人还没对上号:他在网站付了钱,但还没用同一个邮箱在 App 里登录过。" +
+            "他一登录就会自动认领;隔一两天还挂在这,主动去问一句。" });
   });
   var all = list.concat(extra);
-  if (!all.length) { $("alarmSec").classList.add("hidden"); return; }
+  if (!all.length) {
+    $("alarmSec").classList.add("hidden");
+    $("alarms").classList.add("hidden");
+    $("alarmsCalm").classList.add("hidden");
+    return;
+  }
   $("alarmSec").classList.remove("hidden");
-  var high = all.some(function (a) { return a.severity === "high"; });
-  $("alarms").className = "card alarm" + (high ? " high" : "");
-  $("alarms").innerHTML = all.map(function (a) {
+
+  // ── 降噪:对账已经把没结算的那些按真实用量清零了,钱一分没少 ──────────
+  // 那它就不该是一张红卡 —— 每天开后台第一眼被自己账号的红色吓一跳,
+  // 看三天之后这张卡就不再被看见了,真出事那天也一样没人看。
+  // ⛔ 不删这条警报:它仍然说明 App 的结算路径有洞。只是换个说法和颜色。
+  var byId = {};
+  (DATA.users || []).forEach(function (u) { byId[u.user_id] = u; });
+  function reconciledAway(a) {
+    if (a.signal !== "签了通行证不结算") return false;
+    var u = byId[a.user_id];
+    if (!u) return false;                       // 对不上人 = 不敢降级
+    var unsettled = Number(u.leases_unsettled || 0);
+    return unsettled > 0 && Number(a.reconciled || 0) >= unsettled;
+  }
+  function alarmRow(a) {
     return '<div class="alarm-row">' +
       '<span class="sig">' + esc(a.signal) + '</span>' +
       '<span class="who2 mono">' + esc(a.email || "—") + '</span>' +
       '<span class="det">' + esc(a.detail || "") + '</span>' +
+      (a.hint ? '<span class="hint">' + esc(a.hint) + '</span>' : "") +
     '</div>';
-  }).join("");
+  }
+
+  var calm = all.filter(reconciledAway);
+  var loud = all.filter(function (a) { return !reconciledAway(a); });
+
+  if (loud.length) {
+    var high = loud.some(function (a) { return a.severity === "high"; });
+    $("alarms").className = "card alarm" + (high ? " high" : "");
+    $("alarms").innerHTML = loud.map(alarmRow).join("");
+  } else {
+    $("alarms").className = "card alarm hidden";
+    $("alarms").innerHTML = "";
+  }
+
+  if (calm.length) {
+    $("alarmsCalm").className = "card calmcard";
+    $("alarmsCalm").innerHTML =
+      '<div class="calmhead">对账已经清零的 —— 留个底,不用现在管</div>' +
+      calm.map(alarmRow).join("");
+  } else {
+    $("alarmsCalm").className = "card calmcard hidden";
+    $("alarmsCalm").innerHTML = "";
+  }
 }
 
 // ── 总览 ──────────────────────────────────────────
@@ -583,20 +666,54 @@ function visibleUsers() {
   return list;
 }
 
+// 来源:这个人是怎么进来的。⛔ 不编 —— 审计表里查不到就写「查不到」。
+var SOURCE_LABEL = { invite: "邀请码", access_request: "官网申请", manual: "手动开座" };
+
+function sourceCell(u) {
+  var k = String(u.source_kind || "unknown");
+  if (!SOURCE_LABEL[k]) return '<span class="muted">查不到</span>';
+  return '<span class="chip">' + esc(SOURCE_LABEL[k]) + "</span>" +
+         (u.source_ref ? '<div class="muted src mono mob-hide">' + esc(u.source_ref) + "</div>" : "");
+}
+
+function shortDate(iso) {
+  if (!iso) return "";
+  var d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : d.toLocaleDateString("zh-CN");
+}
+
+// 「一次都没听写过」和「不知道」是两件事。服务端扫到上限时会回
+// lifecycle_truncated:true,那时空值只代表**没查到**,不许印成「没有」。
+function firstDictCell(u) {
+  var t = shortDate(u.first_dictation);
+  if (t) return esc(t);
+  return (DATA && DATA.lifecycle_truncated)
+    ? '<span class="muted" title="这一批没扫到,不代表没有">?</span>'
+    : '<span class="muted">没有</span>';
+}
+
 function renderUsers() {
   var list = visibleUsers();
   $("userCount").textContent = list.length + " / " + (DATA.users || []).length + " 人";
+  // 列序 = 一个人的故事:谁 → 从哪来 → 什么档位 → 什么状态 → 用了多少 →
+  // 第一次真的用是什么时候 → 最近还在不在。
+  // mob-hide = 手机上不画(≤520px):用量三列和「最后登录」在手机上扫不动,
+  // 而「来源 / 首次听写」是这一版存在的理由,手机上必须留着。
+  // ⚠️ 前六列 = 一个人的故事,而且必须排在**用量三列之前**:实测(measureW)
+  //    这张表在 1024 宽就已经比容器宽了(老版本 942 刚好放下、新版本 1054),
+  //    排在后面的列在笔记本上要横着滚才看得见 —— 那就等于没加。
   var cols = [
-    ["email", "邮箱", ""], ["plan", "档位", ""], ["status", "状态", ""],
-    ["used_micro", "本月花费", "num"], ["used_requests", "请求", "num"],
-    ["chars_week", "本周字数", "num"], ["lecture_minutes_month", "长录音", "num"],
-    ["last_seen", "最后活动", ""],
-    ["last_login", "最后登录", ""]
+    ["email", "邮箱", ""], ["source_kind", "来源", ""],
+    ["plan", "档位", "mob-hide"], ["status", "状态", ""],
+    ["first_dictation", "首次听写", ""], ["last_seen", "最后活动", ""],
+    ["used_micro", "本月花费", "num mob-hide"], ["used_requests", "请求", "num mob-hide"],
+    ["chars_week", "本周字数", "num mob-hide"], ["lecture_minutes_month", "长录音", "num mob-hide"],
+    ["last_login", "最后登录", "mob-hide"]
   ];
   var head = "<thead><tr>" + cols.map(function (c) {
     var arrow = sortKey === c[0] ? '<span class="arrow">' + (sortDir < 0 ? "▼" : "▲") + "</span>" : "";
     return '<th class="sortable ' + c[2] + '" data-k="' + c[0] + '">' + c[1] + " " + arrow + "</th>";
-  }).join("") + "<th></th></tr></thead>";
+  }).join("") + '<th class="mob-hide"></th></tr></thead>';
 
   var body = list.map(function (u) {
     var cap = Number(u.quota_micro || 0);
@@ -606,22 +723,28 @@ function renderUsers() {
     var risk = riskCount(u);
     return '<tr class="clickable" data-id="' + esc(u.user_id) + '">' +
       "<td>" + esc(u.email) + "</td>" +
-      '<td><span class="chip ' + (u.plan === "pro" ? "pro" : u.plan === "developer" ? "dev" : "") + '">' + esc(u.plan) + "</span></td>" +
+      "<td>" + sourceCell(u) + "</td>" +
+      '<td class="mob-hide"><span class="chip ' + (u.plan === "pro" ? "pro" : u.plan === "developer" ? "dev" : "") + '">' + esc(u.plan) + "</span></td>" +
       "<td>" + (u.status === "active"
         ? '<span class="chip ok">正常</span>'
         : '<span class="chip banned">' + esc(u.status) + "</span>") +
         (risk ? ' <span class="chip risk">⚠ ' + risk + "</span>" : "") + "</td>" +
-      '<td class="num">' + esc(usd(used)) +
-        (cap > 0 ? ' <span class="bar-track"><span class="bar-fill ' + cls + '" style="width:' + (pct * 100).toFixed(0) + '%"></span></span>' : "") + "</td>" +
-      '<td class="num">' + esc(u.used_requests || 0) + " / " + esc(u.quota_requests || 0) + "</td>" +
-      '<td class="num">' + esc(u.chars_week || 0) + "</td>" +
-      '<td class="num">' + esc(u.lecture_minutes_month || 0) + " 分</td>" +
+      "<td>" + firstDictCell(u) + "</td>" +
       "<td>" + esc(when(u.last_seen)) + "</td>" +
-      "<td>" + esc(when(u.last_login)) + "</td>" +
-      '<td class="muted">›</td></tr>';
+      '<td class="num mob-hide">' + esc(usd(used)) +
+        (cap > 0 ? ' <span class="bar-track"><span class="bar-fill ' + cls + '" style="width:' + (pct * 100).toFixed(0) + '%"></span></span>' : "") + "</td>" +
+      '<td class="num mob-hide">' + esc(u.used_requests || 0) + " / " + esc(u.quota_requests || 0) + "</td>" +
+      '<td class="num mob-hide">' + esc(u.chars_week || 0) + "</td>" +
+      '<td class="num mob-hide">' + esc(u.lecture_minutes_month || 0) + " 分</td>" +
+      '<td class="mob-hide">' + esc(when(u.last_login)) + "</td>" +
+      '<td class="muted mob-hide">›</td></tr>';
   }).join("");
 
-  $("users").innerHTML = head + "<tbody>" + (body || '<tr><td colspan="9" class="muted">没有匹配的用户</td></tr>') + "</tbody>";
+  // ⚠️ colspan 跟着列数算,不写死:上一版写死 9 而实际有 10 列,
+  //    「没有匹配的用户」那一行短一格 —— 加了两列之后会更明显。
+  $("users").innerHTML = head + "<tbody>" +
+    (body || '<tr><td colspan="' + (cols.length + 1) + '" class="muted">没有匹配的用户</td></tr>') +
+    "</tbody>";
 
   Array.prototype.forEach.call($("users").querySelectorAll("th.sortable"), function (th) {
     th.onclick = function () {
@@ -669,6 +792,10 @@ function openDrawer(id) {
     kv("其中没结算", (u.leases_unsettled >= 3 ? '<span class="chip risk">' : "<span>") + esc(u.leases_unsettled || 0) + " 次</span>") +
     kv("结算报零用量", (u.settle_zero >= 3 ? '<span class="chip risk">' : "<span>") + esc(u.settle_zero || 0) + " 次</span>") +
 
+    // 时间线:走到哪一步了。数据是抽屉打开时才去问的一条**只读**路由
+    // (/admin/users/timeline)—— 列表页有多少人就不该打多少次明细。
+    '<div class="act"><h4>生命周期</h4><div id="tlBox"><p class="note">读取中…</p></div></div>' +
+
     '<div class="act"><h4>封禁</h4>' +
       '<input id="banReason" type="text" placeholder="理由(必填 —— 三个月后翻记录时只剩它)">' +
       '<div class="row">' +
@@ -701,8 +828,75 @@ function openDrawer(id) {
 
   $("drawer").style.display = "block";
   $("scrim").style.display = "block";
+  loadTimeline(u.user_id);
 }
-function closeDrawer() { $("drawer").style.display = "none"; $("scrim").style.display = "none"; }
+
+// ── 生命周期:开座 → 首次登录 → 首次听写 → 最近活跃 ───────────────────
+// ⚠️ tlSeq:抽屉可以被连着点开三个人,慢的那条响应不许把新抽屉画花。
+//    关抽屉也要 ++ —— 不然它会画进一个已经关掉(但 DOM 还在)的 #tlBox。
+var tlSeq = 0;
+
+function tlRow(step, iso, seat) {
+  if (!iso) {
+    return '<div class="tl-row"><span class="step">' + esc(step) + "</span>" +
+           '<span class="muted">没有记录</span><span class="day"></span></div>';
+  }
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) {
+    return '<div class="tl-row"><span class="step">' + esc(step) + "</span>" +
+           '<span class="muted">没有记录</span><span class="day"></span></div>';
+  }
+  var day = "";
+  if (seat && !isNaN(seat.getTime())) {
+    var n = Math.round((d.getTime() - seat.getTime()) / 86400000);
+    day = "第 " + (n < 0 ? 0 : n) + " 天";
+  }
+  return '<div class="tl-row"><span class="step">' + esc(step) + "</span>" +
+         "<span>" + esc(d.toLocaleDateString("zh-CN")) + "</span>" +
+         '<span class="day">' + esc(day) + "</span></div>";
+}
+
+function timelineHTML(t) {
+  var seat = t.seat_at ? new Date(t.seat_at) : null;
+  var tt = t.totals || {}, lz = t.leases || {};
+  var n = function (x) { return Number(x || 0); };
+  var src = t.source || {};
+  var srcTxt = SOURCE_LABEL[String(src.kind || "")] || "查不到";
+  if (src.ref) srcTxt += " " + src.ref;
+
+  return tlRow("开座", t.seat_at, seat) +
+    tlRow("首次登录", t.first_login, seat) +
+    tlRow("首次听写", t.first_dictation, seat) +
+    tlRow("最近活跃", t.last_seen, seat) +
+    '<div class="tl-sum">听写 ' + esc(n(tt.dictation)) + " 次 · 长录音 " + esc(n(tt.lecture)) +
+      " 次 · 随心问 " + esc(n(tt.ask)) + " 次 · 通行证 " + esc(n(lz.total)) +
+      " 张(结算 " + esc(n(lz.settled)) + " / 对账清零 " + esc(n(lz.reconciled)) + ")</div>" +
+    '<div class="tl-sum">来源:' + esc(srcTxt) + "</div>";
+}
+
+function loadTimeline(id) {
+  var mine = ++tlSeq;
+  fetch(API + "/admin/users/timeline?user_id=" + encodeURIComponent(id), { headers: authHeaders() })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+    .then(function (res) {
+      if (mine !== tlSeq) return;
+      var box = $("tlBox");
+      if (!box) return;
+      if (!res.ok) {
+        var msg = (res.j && res.j.error && res.j.error.message) || ("HTTP " + res.status);
+        box.innerHTML = '<p class="err">时间线没读出来:' + esc(msg) + "</p>";
+        return;
+      }
+      box.innerHTML = timelineHTML(res.j);
+    })
+    .catch(function (e) {
+      if (mine !== tlSeq) return;
+      var box = $("tlBox");
+      if (box) box.innerHTML = '<p class="err">时间线没读出来:' + esc(e.message) + "</p>";
+    });
+}
+
+function closeDrawer() { tlSeq++; $("drawer").style.display = "none"; $("scrim").style.display = "none"; }
 $("scrim").onclick = closeDrawer;
 document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
 
@@ -1012,7 +1206,19 @@ function mintInvite() {
 
 function renderInvites(rows) {
   if (!rows.length) {
-    $("invites").innerHTML = '<tbody><tr><td class="muted">还没铸过邀请码。</td></tr></tbody>';
+    // 「一张都没铸过」和「铸过、但现在一张可用的都没有」是两件完全不同的处境:
+    // 前者是还没开始发码,后者是全用完 / 作废 / 过期了。同一句话会让人以为
+    // 自己从来没发过码 —— 而历史其实在下面的操作留痕里躺着。
+    var att = DATA && DATA.invite_attempts;
+    var everMinted = false;
+    if (att && (((att.recent || []).length > 0) || Number(att.last_24h || 0) > 0)) everMinted = true;
+    if (!everMinted) {
+      var log = (DATA && DATA.audit) || [];
+      everMinted = log.some(function (a) { return a.action === "mint_invite"; });
+    }
+    $("invites").innerHTML = '<tbody><tr><td class="muted">' +
+      (everMinted ? "现在没有可用的码(历史在下面的操作留痕里)。" : "还没铸过邀请码。") +
+      "</td></tr></tbody>";
     return;
   }
   $("invites").innerHTML =
@@ -1147,8 +1353,11 @@ function renderAccess() {
     return;
   }
 
-  var head = "<thead><tr><th>时间</th><th>邮箱</th><th>他说了什么</th><th>语言</th>" +
-             "<th>已有名额?</th><th>状态</th><th></th></tr></thead>";
+  // mob-hide:手机上只留「时间 / 邮箱 / 状态 / 按钮」—— 这一栏在手机上要回答的
+  // 是「有没有人在等、按不按」,备注和语言留给大屏。
+  var head = "<thead><tr><th>时间</th><th>邮箱</th><th class=\"mob-hide\">他说了什么</th>" +
+             "<th class=\"mob-hide\">语言</th>" +
+             "<th class=\"mob-hide\">已有名额?</th><th>状态</th><th></th></tr></thead>";
   var body = rows.map(function (r) {
     var isNew = r.status === "new";
 
@@ -1177,9 +1386,9 @@ function renderAccess() {
     return '<tr class="accrow' + (isNew ? " new" : "") + '">' +
       "<td>" + esc(when(r.created_at)) + "</td>" +
       '<td class="mono">' + esc(r.email) + "</td>" +
-      '<td class="access-note">' + esc(r.note || "—") + "</td>" +
-      "<td>" + esc(r.lang || "—") + "</td>" +
-      '<td class="acc-seat">' + seat + "</td>" +
+      '<td class="access-note mob-hide">' + esc(r.note || "—") + "</td>" +
+      '<td class="mob-hide">' + esc(r.lang || "—") + "</td>" +
+      '<td class="acc-seat mob-hide">' + seat + "</td>" +
       "<td>" + state + "</td>" +
       '<td class="acc-act">' + act + "</td></tr>";
   }).join("");
