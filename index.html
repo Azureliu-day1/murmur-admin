@@ -176,6 +176,18 @@ input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px
        border-radius: 99px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; }
 .tab.on { border-color: var(--coral); color: var(--coral); background: var(--coral-tint); }
 
+/* ── 申请名额:待处理角标 ──────────────────────────
+   放在顶栏而不是只放在那一节的标题上:有人在等回音这件事,不该要求你先滚到第三屏。 */
+.navbadge { display: inline-flex; align-items: baseline; gap: 6px; text-decoration: none;
+            border: 1px solid var(--coral); background: var(--coral-tint); color: var(--coral);
+            border-radius: 99px; padding: 3px 11px; font-size: 12px; }
+.navbadge b { color: var(--coral); font-weight: 600; }
+.accrow.new td { background: var(--coral-tint); }
+/* 两个按钮挤成两行、「但已有账号」被折成两截 —— 都是这一栏最后一列太窄闹的 */
+.accrow td.acc-act, .accrow td.acc-seat { white-space: nowrap; }
+.accrow td.acc-act .btn { padding: 6px 12px; }
+.access-note { max-width: 46ch; white-space: pre-wrap; word-break: break-word; }
+
 /* ── 登录 ─────────────────────────────────────────── */
 .gate { max-width: 380px; margin: 12vh auto; }
 .gate h2 { font: 600 19px/1.3 Georgia, "Songti SC", serif; margin-bottom: 4px; }
@@ -195,6 +207,9 @@ table.mini tr.bad td{color:#b0392a}
       <span class="dot"></span><span class="name">Murmur</span>
       <span class="tag">admin</span>
     </div>
+    <!-- ⚠️ 角标必须在 #who **外面**:render() 每次刷新都会整段重写 #who 的 innerHTML,
+         放进去的话它会在第一次刷新时静悄悄消失。 -->
+    <a class="navbadge hidden" id="accessNav" href="#access">申请名额 <b id="accessNavNum">0</b> 条待处理</a>
     <div class="who" id="who"></div>
   </div>
 
@@ -247,6 +262,20 @@ table.mini tr.bad td{color:#b0392a}
         </div>
         <div class="tablebox"><table id="users"></table></div>
         <p class="note">点任意一行看详情、封禁、调额度、给档位。</p>
+      </div>
+    </div>
+
+    <!-- ── 申请名额:网站表单进来的人(2026-09-17)──────────────────────
+         S1 上线了「申请名额」表单,后台却一个字都看不见 —— 陌生人申请完,
+         信落进一张没人打开的表里。这一栏就是把那张表接到手上。 -->
+    <div class="section" id="access">
+      <div class="eyebrow">access · <b>申请名额</b> <span id="accessCount" class="muted"></span></div>
+      <div class="card">
+        <div class="tablebox"><table id="accessTable"></table></div>
+        <p class="note">从官网「申请名额」表单进来的人。<b>开名额</b>走的是和上面「给一个人开名额」
+          一模一样的那条路(没账号会替他建、然后发一封通知信);<b>不开</b>只是把这条标掉,
+          不通知对方 —— 要不要回他一句,由你决定。两个动作都会留在下面的操作留痕里。</p>
+        <div id="accessMsg"></div>
       </div>
     </div>
 
@@ -433,6 +462,7 @@ $("verifyLink").onclick = function () {
 
 // ── 拉数据 ────────────────────────────────────────
 var DATA = null;
+var ACCESS = null;      // 申请名额那一栏的数据,走自己的路由(见文件末尾 loadAccess)
 
 function boot() {
   var s = session();
@@ -443,6 +473,9 @@ function boot() {
 
 function load() {
   $("who").innerHTML = '<span class="muted">加载中…</span>';
+  // 申请名额单独一条路由,和统计**并行**拉:它一挂不该把整页拖住,
+  // 整页慢也不该让「有人在等回音」这件事跟着晚到。
+  loadAccess();
   fetch(API + "/admin/stats", { headers: authHeaders() })
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
     .then(function (res) {
@@ -1055,6 +1088,163 @@ function renderProbe(p) {
     html += '<p class="note">还没有任何兑换尝试。</p>';
   }
   $("probe").innerHTML = html;
+}
+
+// ── 申请名额(2026-09-17)──────────────────────────────────────────────
+// 数据走 GET /admin/access-requests(和 /admin/stats 同一道管理员门)。
+// ⛔ 那条路由不回 ip_hash / ua_short —— 它们存在只为限频,这一页不该多摆一份指纹。
+
+function loadAccess() {
+  fetch(API + "/admin/access-requests", { headers: authHeaders() })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok) {
+        // 401 交给 /admin/stats 那条路统一处理(清会话 → 回登录页)。
+        // 两处都清的话,人会被踢回登录页两次,第二次还会把刚填的码冲掉。
+        if (res.status === 401) return;
+        var msg = (res.j && res.j.error && res.j.error.message) || ("HTTP " + res.status);
+        $("accessTable").innerHTML =
+          '<tbody><tr><td class="err">申请列表没读出来:' + esc(msg) + "</td></tr></tbody>";
+        return;
+      }
+      ACCESS = res.j;
+      renderAccess();
+    })
+    .catch(function (e) {
+      $("accessTable").innerHTML =
+        '<tbody><tr><td class="err">申请列表没读出来:' + esc(e.message) + "</td></tr></tbody>";
+    });
+}
+
+function accessRowById(id) {
+  var rows = (ACCESS && ACCESS.requests) || [];
+  for (var i = 0; i < rows.length; i++) { if (rows[i].id === id) return rows[i]; }
+  return null;
+}
+
+function renderAccess() {
+  var rows = (ACCESS && ACCESS.requests) || [];
+  var c = (ACCESS && ACCESS.counts) || {};
+  var pending = Number(c["new"] || 0);
+
+  // 顶栏角标:没有待处理的就整个藏起来 —— 一个常年挂着「0」的红点,
+  // 看几天之后就不再被看见了,那时它真的变红也没人注意。
+  if (pending > 0) {
+    $("accessNavNum").innerHTML = esc(pending);
+    $("accessNav").classList.remove("hidden");
+  } else {
+    $("accessNav").classList.add("hidden");
+  }
+  $("accessCount").innerHTML = ACCESS
+    ? "待处理 " + esc(pending) + " · 开了 " + esc(Number(c.approved || 0)) +
+      " · 没开 " + esc(Number(c.declined || 0)) + " · 共 " + esc(Number(c.total || 0)) + " 条"
+    : "";
+
+  if (!rows.length) {
+    $("accessTable").innerHTML =
+      '<tbody><tr><td class="muted">还没有人从官网申请过名额。' +
+      '(表单在 murmur 官网「申请名额」那一栏,匿名就能填。)</td></tr></tbody>';
+    return;
+  }
+
+  var head = "<thead><tr><th>时间</th><th>邮箱</th><th>他说了什么</th><th>语言</th>" +
+             "<th>已有名额?</th><th>状态</th><th></th></tr></thead>";
+  var body = rows.map(function (r) {
+    var isNew = r.status === "new";
+
+    // 已有名额:这一列是为了不让人对着一个早就开过座的邮箱再按一次
+    var seat = r.has_seat
+      ? '<span class="chip">有名额</span>'
+      : (r.has_user ? '<span class="muted">没有 · 但已有账号</span>' : '<span class="muted">没有</span>');
+
+    var state;
+    if (isNew) {
+      state = "<b>新</b>";
+    } else {
+      state = (r.status === "approved" ? "开了名额" : "没开") +
+        '<div class="muted" style="font-size:11.5px">' +
+        esc(r.handled_by || "—") + " · " + esc(when(r.handled_at)) +
+        (r.handled_reason ? "<br>" + esc(r.handled_reason) : "") + "</div>";
+    }
+
+    // ⚠️ 只传 id(uuid),不把邮箱塞进 onclick 属性里:邮箱是陌生人自己敲的,
+    //    一个带引号的地址就能把这段 HTML 撕开。要用的时候按 id 回表里取。
+    var act = isNew
+      ? '<button class="btn" onclick="accessAct(\'' + esc(r.id) + '\',1)">开名额</button> ' +
+        '<button class="btn quiet" onclick="accessAct(\'' + esc(r.id) + '\',0)">不开</button>'
+      : "";
+
+    return '<tr class="accrow' + (isNew ? " new" : "") + '">' +
+      "<td>" + esc(when(r.created_at)) + "</td>" +
+      '<td class="mono">' + esc(r.email) + "</td>" +
+      '<td class="access-note">' + esc(r.note || "—") + "</td>" +
+      "<td>" + esc(r.lang || "—") + "</td>" +
+      '<td class="acc-seat">' + seat + "</td>" +
+      "<td>" + state + "</td>" +
+      '<td class="acc-act">' + act + "</td></tr>";
+  }).join("");
+
+  $("accessTable").innerHTML = head + "<tbody>" + body + "</tbody>";
+}
+
+/// 开名额 / 不开。理由用 prompt(和作废邀请码同一个形态,别新发明一种)。
+function accessAct(id, grant) {
+  var r = accessRowById(id);
+  if (!r) { alert("这条申请刚才不见了 —— 刷新一下"); return; }
+  var reason;
+  if (grant) {
+    reason = prompt("给 " + r.email + " 开名额。\n\n备注(可留空):谁介绍的 / 为什么给。");
+    if (reason === null) return;                    // 取消 = 什么都没发生
+    if (r.has_seat && !confirm(r.email + " 已经有名额了。还要再开一次吗?\n\n" +
+        "(不会重复给什么,只会把封禁/暂停解回 active,并且把这条申请标成处理过。)")) return;
+  } else {
+    reason = prompt("不给 " + r.email + " 开。\n\n为什么?(必填 —— 过几个月再翻这条,只剩它说得清)");
+    if (reason === null) return;
+    if (!reason.trim()) { alert("「不开」要写理由。"); return; }
+  }
+  reason = (reason || "").trim();
+
+  $("accessMsg").innerHTML = '<p class="note">' + (grant ? "开着…" : "标着…") + "</p>";
+  fetch(API + "/admin/action", {
+    method: "POST", headers: authHeaders(),
+    body: JSON.stringify({ action: grant ? "access_grant" : "access_dismiss",
+                           id: id, reason: reason })
+  }).then(function (rr) { return rr.json().then(function (j) { return { ok: rr.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("accessMsg").innerHTML = '<p class="err">' + esc(m) + "</p>";
+        load();                                     // 多半是被另一处处理掉了 —— 拉最新的
+        return;
+      }
+      var who2 = esc(res.j.email);
+      var msg;
+      if (!grant) {
+        msg = '<p class="okmsg">' + who2 + ' 这条标成「没开」了。他不会收到任何通知 ——' +
+              '要不要回他一句,由你决定。</p>';
+      } else if (res.j.existed) {
+        // 和上面「给一个人开名额」同一个口径,一个字都不多承诺
+        msg = '<p class="okmsg">' + who2 + ' 本来就有名额,已确保是 active,这条申请标成处理过了。</p>';
+      } else if (res.j.mailed === false) {
+        msg = '<p class="okmsg">' + who2 + ' 的名额开好了。</p>' +
+              '<p class="err">但通知信<b>没发出去</b> —— 他不会知道,你得自己告诉他。</p>';
+      } else {
+        msg = '<p class="okmsg">' + who2 + ' 的名额开好了,通知信已提交给邮件服务。</p>' +
+              '<p class="note">⚠️ 提交成功不等于送达(这条路目前投递不稳)。' +
+              '稳妥起见自己也说一声:让他打开 Murmur → 登录 → 填这个邮箱,验证码那封信是可靠的。</p>';
+      }
+      // 服务端如实回这两面旗,页面就得如实转述 —— 别替它打包票
+      if (res.j.marked === false) {
+        msg += '<p class="note">⚠️ 这条申请刚才已经被别处标掉了' +
+               (grant ? ",名额仍然是开好的。" : "。") + "</p>";
+      }
+      if (res.j.audited === false) {
+        msg += '<p class="err">⚠️ 这一步<b>没记进操作留痕</b> —— 下面那张审计表里不会有它。</p>';
+      }
+      $("accessMsg").innerHTML = msg;
+      load();
+    })
+    .catch(function (e) { $("accessMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
 }
 
 </script>
