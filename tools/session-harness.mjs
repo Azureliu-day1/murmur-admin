@@ -68,7 +68,7 @@ function run(name, { session, serverExpired, statsAlways401, refreshFails, retry
     log.push(`${method} ${short}   Bearer ${tok}  ← 200`);
     if (short.indexOf(STATS) >= 0) {
       return Promise.resolve(res(200, {
-        admin: "azureliu666@gmail.com", server_time: "2026-09-17T23:59:00Z",
+        admin: "admin@example.com", server_time: "2026-09-17T23:59:00Z",
         overview: {}, users: [], anomalies: [], plans: [], audit: [], invites: [],
         daily: [], features: [], feature_totals: [], apis: {},
       }));
