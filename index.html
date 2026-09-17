@@ -256,7 +256,7 @@ table.mini tr.bad td{color:#b0392a}
   <div id="gate" class="gate">
     <div class="card">
       <h2>管理后台</h2>
-      <p class="note" style="margin-bottom:14px">用管理员邮箱收一个验证码。会话存在这台浏览器里,下次直接进。</p>
+      <p class="note" style="margin-bottom:14px">用管理员邮箱收一个验证码。会话存在这台浏览器里,一小时后自动续,不用再收码。</p>
       <div id="step1">
         <input id="email" type="email" placeholder="管理员邮箱" autocomplete="username">
         <button class="btn" id="send">发验证码</button>
@@ -448,6 +448,74 @@ function authHeaders() {
   return { "Authorization": "Bearer " + (s && s.access_token), "Content-Type": "application/json" };
 }
 
+// Supabase 有时只回 expires_in(秒),有时两个都回。统一补一个绝对时刻,
+// 否则 boot() 没法判断「这份会话还有多久死」,只能等 401 才知道。
+function stampExpiry(j) {
+  if (j && !j.expires_at && j.expires_in) {
+    j.expires_at = Math.floor(Date.now() / 1000) + Number(j.expires_in);
+  }
+  return j;
+}
+
+// ── 续期 ──────────────────────────────────────────
+// access_token 只活一小时(线上 jwt_exp = 3600)。这一页以前拿到 session 就只
+// 用 access_token —— 过期后 /admin/stats 回 401,于是清会话、回登录页重新收码。
+// refresh_token 一直躺在同一份 session 里,只是从来没人用过。
+//
+// ⚠️ 线上开着 refresh_token_rotation:每续一次,旧的 refresh_token 当场作废、
+//    响应里给一张新的。所以必须把**整份新 session** 存回去 —— 只更新
+//    access_token 的话,下次续期会拿着已作废的旧码去换,400,人照样被踢出去。
+// ⚠️ 同样因为 rotation,两个请求同时 401 时不许各打各的 refresh:第二个拿的是
+//    刚被作废的那张,必 400。所以全局共用一个在飞的 Promise。
+var refreshInflight = null;
+
+function refreshSession(staleToken) {
+  if (refreshInflight) return refreshInflight;         // 已经有人在续了,搭同一班车
+  var s = session();
+  if (!s || !s.refresh_token) return Promise.resolve(false);
+  // 我这个 401 是拿旧 token 发出去的回声,而别人已经续完了 —— 直接重试就行,
+  // 再续一次只是白白转一张新码。
+  if (staleToken && s.access_token && s.access_token !== staleToken) return Promise.resolve(true);
+
+  refreshInflight = fetch(HOST + "/auth/v1/token?grant_type=refresh_token", {
+    method: "POST",
+    headers: { "apikey": ANON, "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: s.refresh_token })
+  }).then(function (r) {
+    if (!r.ok) return false;                            // 400/401 = 这张 refresh 也废了
+    return r.json().then(function (j) {
+      if (!j || !j.access_token || !j.refresh_token) return false;
+      saveSession(stampExpiry(j));
+      return true;
+    });
+  }).catch(function () { return false; })               // 断网也算续不动,不抛给调用方
+    .then(function (ok) { refreshInflight = null; return ok; });
+
+  return refreshInflight;
+}
+
+// 带鉴权的请求统统走这里。⛔ 每个请求最多续一次、最多重试一次:
+// 401 → 续 → 重试 → 还 401,那就是真的没权限(不在管理员名单里了),
+// 把这个 401 原样交回调用方,由它决定是回登录页还是只显示一行错。
+function apiFetch(url, opts) {
+  opts = opts || {};
+  function send(mayRefresh) {
+    // ⚠️ headers 必须在**每次**发之前现算:重试那一发要用刚换回来的新 token,
+    //    把 headers 在外面算好一次会让重试原样再挨一个 401。
+    var s = session();
+    var used = s && s.access_token;
+    var init = { method: opts.method || "GET", headers: authHeaders() };
+    if (opts.body != null) init.body = opts.body;
+    return fetch(url, init).then(function (r) {
+      if (r.status !== 401 || !mayRefresh) return r;
+      return refreshSession(used).then(function (ok) {
+        return ok ? send(false) : r;                    // 续不动就把原来那个 401 还回去
+      });
+    });
+  }
+  return send(true);
+}
+
 // ── 登录 ──────────────────────────────────────────
 $("send").onclick = function () {
   var em = $("email").value.trim();
@@ -478,7 +546,7 @@ function verifyBody(body, fallbacks) {
     body: JSON.stringify(body)
   }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
     .then(function (res) {
-      if (res.ok && res.j.access_token) { saveSession(res.j); boot(); return; }
+      if (res.ok && res.j.access_token) { saveSession(stampExpiry(res.j)); boot(); return; }
       if (fallbacks && fallbacks.length) { verifyBody(fallbacks[0], fallbacks.slice(1)); return; }
       $("gateMsg").innerHTML = '<p class="err">验不过 —— 码可能过期了(每个码只活几分钟),重发一次。</p>';
     }).catch(function (e) {
@@ -505,10 +573,32 @@ $("verifyLink").onclick = function () {
 var DATA = null;
 var ACCESS = null;      // 申请名额那一栏的数据,走自己的路由(见文件末尾 loadAccess)
 
+// 提前 5 分钟就续:卡着点发出去的请求会在路上过期,那时 401 回来虽然也能补救,
+// 但第一屏已经先空白一下了。
+var EXPIRY_SLACK = 300;
+
+function secondsLeft(s) {
+  if (!s || !s.expires_at) return null;   // 没这个字段 = 不知道,交给 401 那条路兜底
+  return Number(s.expires_at) - Math.floor(Date.now() / 1000);
+}
+
+function showGate() { $("gate").classList.remove("hidden"); $("main").classList.add("hidden"); }
+
 function boot() {
   var s = session();
-  if (!s || !s.access_token) { $("gate").classList.remove("hidden"); $("main").classList.add("hidden"); return; }
+  if (!s || !s.access_token) { showGate(); return; }
   $("gate").classList.add("hidden");
+
+  // 隔一夜再打开 = 一定过期了。先续再拉数据,别让第一屏先红一下再自己好。
+  var left = secondsLeft(s);
+  if (left !== null && left < EXPIRY_SLACK) {
+    refreshSession().then(function (ok) {
+      // 续不动而且已经过期 = 只能重新收码;续不动但还没过期 = 旧 token 还能用,照拉。
+      if (!ok && left <= 0) { clearSession(); showGate(); return; }
+      load();
+    });
+    return;
+  }
   load();
 }
 
@@ -517,11 +607,12 @@ function load() {
   // 申请名额单独一条路由,和统计**并行**拉:它一挂不该把整页拖住,
   // 整页慢也不该让「有人在等回音」这件事跟着晚到。
   loadAccess();
-  fetch(API + "/admin/stats", { headers: authHeaders() })
+  apiFetch(API + "/admin/stats")
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
     .then(function (res) {
       if (!res.ok) {
-        // 401/403 = 会话过期或不是管理员。别把两者说成同一句 —— 处理方式不同。
+        // 走到这里的 401 已经被 apiFetch 续过一次、重试过一次了 —— 也就是说
+        // refresh_token 也废了(或这个邮箱被移出管理员名单)。这时候才该回登录页。
         if (res.status === 401) { clearSession(); boot(); return; }
         var msg = (res.j && res.j.error && res.j.error.message) || ("HTTP " + res.status);
         $("who").innerHTML = '<span class="err">' + esc(msg) + '</span>';
@@ -876,7 +967,7 @@ function timelineHTML(t) {
 
 function loadTimeline(id) {
   var mine = ++tlSeq;
-  fetch(API + "/admin/users/timeline?user_id=" + encodeURIComponent(id), { headers: authHeaders() })
+  apiFetch(API + "/admin/users/timeline?user_id=" + encodeURIComponent(id))
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
     .then(function (res) {
       if (mine !== tlSeq) return;
@@ -915,7 +1006,7 @@ function doAction(action, userId) {
     body.reason = ($("pReason") || {}).value || "";
   }
   $("drawerMsg").innerHTML = '<p class="note">执行中…</p>';
-  fetch(API + "/admin/action", { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
+  apiFetch(API + "/admin/action", { method: "POST", body: JSON.stringify(body) })
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
     .then(function (res) {
       if (!res.ok || (res.j && res.j.ok === false)) {
@@ -1078,7 +1169,7 @@ function reconcile(apply) {
   $("recMsg").innerHTML = '<p class="note">跑对账中…(要翻 Soniox 的用量日志,可能几秒)</p>';
   // 试算回看 30 天 —— 排障要看的窗口和水位无关
   var url = API + "/asr/reconcile?" + (apply ? "apply=1" : "days=30");
-  fetch(url, { method: "POST", headers: authHeaders() })
+  apiFetch(url, { method: "POST" })
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
     .then(function (res) {
       if (!res.ok || res.j.ok === false) {
@@ -1146,8 +1237,8 @@ function grantSeat() {
   var email = ($("seatEmail").value || "").trim();
   if (!email) { $("seatMsg").innerHTML = '<p class="err">把邮箱填上</p>'; return; }
   $("seatMsg").innerHTML = '<p class="note">开着…</p>';
-  fetch(API + "/admin/action", {
-    method: "POST", headers: authHeaders(),
+  apiFetch(API + "/admin/action", {
+    method: "POST",
     body: JSON.stringify({ action: "grant_seat", email: email,
                            reason: ($("seatReason").value || "").trim() })
   }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
@@ -1182,8 +1273,8 @@ function grantSeat() {
 
 function mintInvite() {
   $("invMsg").innerHTML = '<p class="note">铸着…</p>';
-  fetch(API + "/admin/action", {
-    method: "POST", headers: authHeaders(),
+  apiFetch(API + "/admin/action", {
+    method: "POST",
     body: JSON.stringify({ action: "mint_invite",
                            max_uses: Number($("invUses").value || 1),
                            days: Number($("invDays").value || 0),
@@ -1250,8 +1341,8 @@ function revokeInvite(hash, prefix) {
   var reason = prompt("作废 " + prefix + "…\n\n为什么废?(三个月后翻审计表时,这是唯一救得回来的信息)");
   if (reason === null) return;
   if (!reason.trim()) { alert("作废要写理由"); return; }
-  fetch(API + "/admin/action", {
-    method: "POST", headers: authHeaders(),
+  apiFetch(API + "/admin/action", {
+    method: "POST",
     body: JSON.stringify({ action: "revoke_invite", hash: hash, reason: reason.trim() })
   }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
     .then(function (res) {
@@ -1301,7 +1392,7 @@ function renderProbe(p) {
 // ⛔ 那条路由不回 ip_hash / ua_short —— 它们存在只为限频,这一页不该多摆一份指纹。
 
 function loadAccess() {
-  fetch(API + "/admin/access-requests", { headers: authHeaders() })
+  apiFetch(API + "/admin/access-requests")
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
     .then(function (res) {
       if (!res.ok) {
@@ -1414,8 +1505,8 @@ function accessAct(id, grant) {
   reason = (reason || "").trim();
 
   $("accessMsg").innerHTML = '<p class="note">' + (grant ? "开着…" : "标着…") + "</p>";
-  fetch(API + "/admin/action", {
-    method: "POST", headers: authHeaders(),
+  apiFetch(API + "/admin/action", {
+    method: "POST",
     body: JSON.stringify({ action: grant ? "access_grant" : "access_dismiss",
                            id: id, reason: reason })
   }).then(function (rr) { return rr.json().then(function (j) { return { ok: rr.ok, j: j }; }); })
