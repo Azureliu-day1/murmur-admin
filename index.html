@@ -103,6 +103,8 @@ td.num, th.num { text-align: right; }
 .chip.banned { border-color: var(--stop); color: var(--stop); background: var(--stop-tint); }
 .chip.ok { border-color: var(--green); color: var(--green); }
 .chip.risk { border-color: var(--warn); color: var(--warn); background: var(--warn-tint); }
+/* 可疑 IP 的 hmac 哈希:默认短串,点开是全串 —— 全串 64 位要能折行,别把表撑出屏 */
+code.hash { cursor: pointer; word-break: break-all; }
 
 .bar-track { width: 96px; height: 5px; border-radius: 99px; background: var(--line); overflow: hidden; display: inline-block; vertical-align: middle; }
 .bar-fill { height: 100%; border-radius: 99px; background: var(--coral); min-width: 2px; }
@@ -1356,6 +1358,21 @@ function revokeInvite(hash, prefix) {
     .catch(function (e) { alert(e.message); });
 }
 
+// 兑换尝试表里的 ip 自 2026-09-26(P13)起存的是 hmac(IP) 的 64 位十六进制,不再是明文。
+// 整串摆出来又长又没法读 → 只显示前 8 位 + 「…」;悬停(title)看全串,点一下在短 / 全之间切(对照、复制时用)。
+// 短值(「—」、万一还有的旧明文)原样显示,不截。
+var shortHash = function (s) {
+  var full = String(s == null ? "" : s);
+  if (full.length <= 12) return "<code>" + esc(full || "—") + "</code>";
+  var short = full.slice(0, 8) + "…";
+  return '<code class="hash" title="' + esc(full) + '" data-full="' + esc(full) + '" data-short="' + esc(short) +
+         '" onclick="toggleHash(this)">' + esc(short) + "</code>";
+};
+function toggleHash(el) {
+  var full = el.getAttribute("data-full");
+  el.textContent = el.textContent === full ? el.getAttribute("data-short") : full;
+}
+
 /// 有人在探码 —— 这块以前完全看不见
 function renderProbe(p) {
   if (!p) { $("probe").innerHTML = '<p class="note">没有数据。</p>'; return; }
@@ -1367,7 +1384,7 @@ function renderProbe(p) {
   } else {
     html += '<div class="tablebox"><table><thead><tr><th>IP</th><th>失败次数</th><th>最近一次</th></tr></thead><tbody>' +
       sus.map(function (r) {
-        return "<tr><td><code>" + esc(r.ip) + "</code></td><td>" + esc(r.fails) +
+        return "<tr><td>" + shortHash(r.ip) + "</td><td>" + esc(r.fails) +
                "</td><td>" + esc((r.last || "").slice(0, 16).replace("T", " ")) + "</td></tr>";
       }).join("") + "</tbody></table></div>";
   }
@@ -1378,7 +1395,7 @@ function renderProbe(p) {
     rec.forEach(function (r) {
       var bad = r.outcome !== "ok" && r.outcome !== "ok_nomail";
       html += "<tr" + (bad ? ' class="bad"' : "") + "><td>" + esc(when(r.at)) + "</td><td>" + esc(r.email || "—") +
-              "</td><td>" + esc(r.prefix || "—") + "</td><td>" + esc(r.outcome) + "</td><td>" + esc(r.ip || "—") + "</td></tr>";
+              "</td><td>" + esc(r.prefix || "—") + "</td><td>" + esc(r.outcome) + "</td><td>" + (r.ip ? shortHash(r.ip) : "—") + "</td></tr>";
     });
     html += "</tbody></table>";
   } else {
