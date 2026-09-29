@@ -248,6 +248,23 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--coral); out
 table.mini{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
 table.mini th,table.mini td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line,#e6e6e6);vertical-align:top}
 table.mini tr.bad td{color:#b0392a}
+/* ── 远程配置(2026-09-30):开关与默认值 / 场景风格 / 文案 ───────── */
+.warnmsg { color: var(--warn); font-size: 12.5px; margin-top: 6px; }
+.chip.pub { border-color: var(--llm); color: var(--llm); }
+.rc-scene { padding: 10px 0; border-top: 1px solid var(--line); }
+.rc-scene:first-child { border-top: none; }
+.rc-scene .rc-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.rc-knobs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 10px; margin-top: 8px; }
+.rc-knobs label, .rc-extra label { display: block; font-size: 11.5px; color: var(--faint); margin-bottom: 3px; }
+.rc-knobs select { width: 100%; }
+.rc-extra input { width: 100%; }
+.rc-off .rc-knobs, .rc-off .rc-extra { display: none; }
+.rc-check { font-size: 12.5px; color: var(--second); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.rc-check input { margin: 0; }
+#rcSec input[type=text], #rcSec input[type=number], #rcSec select { margin-bottom: 0; }
+#rcSec td input[type=text] { width: 100%; min-width: 14ch; }
+.rc-preview-tag { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--warn-tint); color: var(--warn); }
+@media (max-width: 720px) { .rc-knobs { grid-template-columns: 1fr 1fr; } }
 </style>
 </head>
 <body>
@@ -433,6 +450,53 @@ table.mini tr.bad td{color:#b0392a}
             <div class="tablebox"><table id="cfgPricing"></table></div>
             <div id="cfgPriceMsg"></div>
             <p class="note">单位是微美元(百万分之一美元)每单位。改了影响<b>下一把 lease 的预扣</b>与之后的结算,已经签出去的不追溯。</p>
+          </div>
+        </div>
+        <!-- ── 远程配置(2026-09-30,契约 CONTRACT-remote-config v0.2)────────
+             一份完整快照 = 开关与默认值 / 场景风格 / 文案 三块,一次「发布」整份写进去,revision +1。
+             ⛔ 页面上的校验只是先挡一道,真门在服务端(整份静态校验,非法整次 400)。 -->
+        <div class="section" id="rcSec">
+          <div class="eyebrow">remote config · <b>远程配置</b> <span class="muted" id="rcVer"></span></div>
+          <div class="card hidden" id="rcNone"></div>
+          <div id="rcBody" class="hidden">
+            <div class="card">
+              <p class="note" style="margin-top:0" id="rcSchema"></p>
+              <div class="tablebox"><table id="rcHistory"></table></div>
+              <div id="rcHistMsg"></div>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="eyebrow">flags &amp; defaults · <b>开关与默认值</b></div>
+              <div class="tablebox"><table id="rcFlags"></table></div>
+              <p class="note">「默认开」只影响<b>从没自己选过</b>的用户,不盖过用户的选择;「紧急关」盖过用户选择,界面显示「暂时关闭」。
+                「公开」= 匿名的 /config/public 也会下发。数值越界客户端回内置;空着 = 不下发、用内置。</p>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="eyebrow">scene styles · <b>场景风格</b></div>
+              <div id="rcStyles"></div>
+              <p class="note">每个场景四个旋钮 + 一行补充(extra):≤ 200 字、不许换行 / 花括号 / 反引号。
+                补充放在整理规则之后,优先级低于规则;含 ignore / forget / system / assistant 这类词只提醒、不拦。</p>
+              <div class="row" style="margin-top:10px">
+                <button class="btn quiet" id="rcPreviewBtn" onclick="rcPreview()">预览(候选配置 × 5 条固定样例)</button>
+              </div>
+              <div id="rcPreviewMsg"></div>
+              <div id="rcPreview"></div>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="eyebrow">copy · <b>文案</b></div>
+              <div class="tablebox"><table id="rcCopy"></table></div>
+              <p class="note">中英各一,≤ 200 字、不许换行。两格都清空 = 删掉这条 = 恢复内置文案。</p>
+            </div>
+            <div class="card" style="margin-top:12px">
+              <div class="cfg-form" style="margin-top:0;padding-top:0;border-top:none">
+                <label for="rcNote">这次改了什么(写进审计,可空)</label>
+                <input id="rcNote" type="text" maxlength="200" spellcheck="false" placeholder="例:邮件场景改随意口气">
+                <div class="row" style="margin-top:10px">
+                  <button class="btn" id="rcPubBtn" onclick="rcPublish()">发布</button>
+                  <span class="cfg-when" id="rcPubHint"></span>
+                </div>
+                <div id="rcPubMsg"></div>
+              </div>
+            </div>
           </div>
         </div>
         <div class="section">
@@ -1783,6 +1847,7 @@ function renderConfig() {
   renderCfgKeys();
   renderCfgPricing();
   renderCfgAudit();
+  renderRemote();
   // 每次重画都从「没试打」开始:版本变了,旧的 OK 不算数
   cfgProbeOk = {};
   ["cfgTier", "cfgProv", "cfgKey"].forEach(function (f) { cfgSetApply(f, false); });
@@ -1905,11 +1970,13 @@ function renderCfgAudit() {
     rows.map(function (r) {
       var id = r.id != null ? r.id : r.audit_id;
       var isKey = /key|secret/i.test(String(r.action || ""));
-      var isRollbackable = !isKey && id != null && r.before != null;
+      var isRemote = /^config\.remote/.test(String(r.action || ""));   // 远程配置有自己的回退(按 revision),不走 /admin/config/rollback
+      var isRollbackable = !isKey && !isRemote && id != null && r.before != null;
       // 服务端只许回退「最近一次改动」(审计行的 config_version = 当前版本,否则 409 stale);行上没带版本就不预判
       var curVer = CONFIG && CONFIG.versions && CONFIG.versions.config_version;
       var isLatest = r.config_version == null || curVer == null || Number(r.config_version) === Number(curVer);
       var act = isKey ? '<span class="cfg-when">密钥不回退</span>'
+        : isRemote ? '<span class="cfg-when">在「远程配置」里回退</span>'
         : (isRollbackable && isLatest) ? '<button class="btn quiet" onclick="cfgRollback(\'' + esc(id) + '\')">回退到这一版</button>'
         : isRollbackable ? '<span class="cfg-when" title="之后配置又改过;只有最近一次改动能回退">之后又改过</span>'
         : '<span class="cfg-when">—</span>';
@@ -2221,10 +2288,384 @@ function cfgRollback(id) {
   for (var i = 0; i < rows.length; i++) if (String(rows[i].id != null ? rows[i].id : rows[i].audit_id) === String(id)) r = rows[i];
   if (!r) { cfgMsg("cfgAudit", "err", "这一行刚才不见了 —— 刷新一下。"); return; }
   if (/key|secret/i.test(String(r.action || ""))) { cfgMsg("cfgAudit", "err", "密钥不回退。"); return; }
+  if (/^config\.remote/.test(String(r.action || ""))) { cfgMsg("cfgAudit", "err", "远程配置在「远程配置」那一块按 revision 回退。"); return; }
   if (!confirm("把 " + (cfgTarget(r) || r.action) + " 回退到这一行改动之前的样子?\n\n之前:" + cfgBrief(r.before))) return;
   return cfgPost("rollback", { audit_id: r.id != null ? r.id : r.audit_id }).then(function (res) {
     cfgAfterWrite("cfgAudit", res, "回退了。审计里多了一行。");
   }).catch(function (e) { cfgMsg("cfgAudit", "err", esc(e.message)); });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 远程配置(2026-09-30,契约 docs/CONTRACT-remote-config.md v0.2)
+//   GET  /admin/config                    → 多一格 remote:{schema_version, revision, published_at, published_by, note,
+//                                            snapshot{flags,defaults,styles,copy}, builtin{同形}, clients?, changed?, history[]}
+//   POST /admin/config/remote             {base_revision, note, snapshot}   写:先 challenge 拿 nonce,带 x-admin-confirm
+//   POST /admin/config/remote/preview     {styles}                          不写配置、不带 nonce(费用记 admin.probe)
+//   POST /admin/config/remote/rollback    {base_revision, to_revision}      写:同样带 nonce;当前 revision 不对 → 409 stale
+// 四条规矩写在代码里(哨兵 tools/session-harness.mjs r–v):
+//   ① extra 违规(> 200 字 / 换行 / 控制字符 / 花括号 / 反引号)发布与预览都**不发请求**;角色词只黄色提醒、不拦。
+//   ② 发布 = 先拿一次性 nonce 再 POST;服务端 400 把原文(message / code / details)原样摆出来,不改写成人话。
+//   ③ 回退只挂在最近一次发布上;409 stale 说人话。
+//   ④ 预览结果只画进那一格 DOM:不进 localStorage、不进全局变量;标「只供人眼看,不是质量证明」。
+// ════════════════════════════════════════════════════════════════════
+var RC_FLAGS = [
+  ["scene_styling_default_on", "场景风格默认开", true],
+  ["nextword_default_on", "下一个词联想默认开", true],
+  ["ai_card_default_on", "AI 整理卡默认开", true],
+  ["kill_scene_styling", "紧急关 · 场景风格", false],
+  ["kill_ai_card", "紧急关 · AI 整理卡", false]
+];                                                    // 第三格 = 公开键(/config/public 也下发)
+var RC_DEFAULTS = [
+  ["hud_done_seconds", "整理完成后 HUD 停留(秒)", 0.8, 4.0, 0.1],
+  ["parked_ttl_seconds", "暂存保留(秒)", 10, 180, 1],
+  ["quota_warn_ratio", "额度提醒阈值(用掉的比例)", 0.5, 0.95, 0.01]
+];
+var RC_SCENES = [["email", "邮件"], ["chat", "聊天"], ["code", "代码 / 终端"], ["aiAssistant", "给 AI 下指令"],
+                 ["document", "文档 / 笔记"], ["social", "社交发帖"], ["searchField", "搜索框"], ["shortField", "单行表单框"]];
+var RC_KNOBS = [
+  ["register", "语气", [["formal", "正式"], ["neutral", "中性"], ["casual", "随意"]]],
+  ["punctuation", "标点", [["keep", "保留原样"], ["complete", "补全"], ["light", "少加"]]],
+  ["keep_technical", "术语原样", [["1", "保留"], ["0", "不强求"]]],
+  ["structure", "结构", [["prose", "段落"], ["list_ok", "可以列表"]]]
+];
+var RC_COPY = [["quota_exhausted_free", "免费额度用完"], ["quota_exhausted_pro", "Pro 额度用完"], ["update_available", "有新版本"]];
+var RC_EXTRA_MAX = 200;
+var rcPreviewSig = null;          // 预览时那一份候选 styles 的签名(只有签名,没有结果)
+
+function rcRemote() { return (CONFIG && CONFIG.remote) || null; }
+function rcSnap() { var r = rcRemote() || {}; return r.snapshot || r.config || r; }
+function rcBuiltin() { var r = rcRemote() || {}; return r.builtin || r.defaults_builtin || {}; }
+function rcPart(o, part) { return (o && o[part] && typeof o[part] === "object") ? o[part] : {}; }
+function rcRev() { var r = rcRemote(); return r && r.revision != null ? Number(r.revision) : null; }
+function rcSceneList() {
+  var seen = {}, list = RC_SCENES.slice();
+  list.forEach(function (s) { seen[s[0]] = 1; });
+  // 服务端多给的场景(客户端新加的)也画出来,名字就用 rawValue
+  Object.keys(rcPart(rcBuiltin(), "styles")).concat(Object.keys(rcPart(rcSnap(), "styles"))).forEach(function (k) {
+    if (!seen[k] && k !== "unknown") { seen[k] = 1; list.push([k, k]); }
+  });
+  return list;
+}
+// 稳定序列化(键排序)—— 比较「改没改」用
+function rcStable(v) {
+  if (v === undefined) return "undefined";
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return "[" + v.map(rcStable).join(",") + "]";
+  return "{" + Object.keys(v).sort().map(function (k) { return JSON.stringify(k) + ":" + rcStable(v[k]); }).join(",") + "}";
+}
+function rcShow(v) {
+  if (v === undefined) return '<span class="muted">—</span>';
+  if (v === true) return "开";
+  if (v === false) return "关";
+  return esc(typeof v === "object" ? JSON.stringify(v) : v);
+}
+// 每条的「最后改动」:服务端给了逐键的 changed{路径: {revision, at, by}} 就用它,没给就用整份快照那一次
+function rcChanged(path) {
+  var r = rcRemote() || {}, c = r.changed && r.changed[path];
+  if (c) return '<span class="cfg-when">r' + esc(c.revision) + (c.at ? " · " + esc(when(c.at)) : "") + (c.by ? " · " + esc(c.by) : "") + "</span>";
+  var cur = rcPart(rcSnap(), path.split(".")[0])[path.split(".")[1]];
+  if (cur === undefined) return '<span class="cfg-when">—</span>';
+  return '<span class="cfg-when">r' + esc(r.revision) + (r.published_at ? " · " + esc(when(r.published_at)) : "") + "</span>";
+}
+
+function renderRemote() {
+  var r = rcRemote();
+  if (!r) {
+    $("rcBody").classList.add("hidden");
+    $("rcVer").textContent = "";
+    $("rcNone").innerHTML = '<p class="muted">服务端还没有远程配置(GET /admin/config 里没有 remote 这一格)。</p>';
+    $("rcNone").classList.remove("hidden");
+    return;
+  }
+  $("rcNone").classList.add("hidden");
+  $("rcBody").classList.remove("hidden");
+  $("rcVer").textContent = "revision " + (r.revision == null ? "—" : r.revision) + " · schema " + (r.schema_version == null ? "—" : r.schema_version);
+  $("rcSchema").innerHTML = "schema_version " + esc(r.schema_version == null ? "—" : r.schema_version) + ":" +
+    esc(r.clients || r.schema_note || "0.53 及以上的 Mac 客户端会吃到这份配置;更旧的版本拿不到、也不受影响;iOS 不接。") +
+    " 生效口径:客户端下一次刷新(约 " + esc((r.refresh_s || rcSnap().refresh_s || 300) / 60) + " 分钟内)/ 下一次听写,不承诺更快。";
+  renderRcHistory();
+  renderRcFlags();
+  renderRcStyles();
+  renderRcCopy();
+  $("rcPreview").innerHTML = "";               // 版本变了,旧预览不算数
+  $("rcPreviewMsg").innerHTML = "";
+  rcPreviewSig = null;
+  $("rcPubHint").textContent = r.revision != null ? "发布后是 revision " + (Number(r.revision) + 1) : "";
+}
+
+function rcHistoryRows() {
+  var r = rcRemote() || {};
+  var h = Array.isArray(r.history) ? r.history.slice() : [];
+  if (!h.length && r.revision != null) h = [{ revision: r.revision, published_at: r.published_at, published_by: r.published_by, note: r.note }];
+  return h.sort(function (a, b) { return Number(b.revision) - Number(a.revision); });
+}
+function rcPrevRevision() {
+  var h = rcHistoryRows(), cur = rcRev();
+  for (var i = 0; i < h.length; i++) if (Number(h[i].revision) < cur) return Number(h[i].revision);
+  return cur != null && cur > 1 ? cur - 1 : null;
+}
+function renderRcHistory() {
+  var h = rcHistoryRows(), cur = rcRev(), prev = rcPrevRevision();
+  if (!h.length) { $("rcHistory").innerHTML = '<tbody><tr><td class="muted">还没有发布过。</td></tr></tbody>'; return; }
+  $("rcHistory").innerHTML = "<thead><tr><th>revision</th><th>时间</th><th class=\"mob-hide\">操作人</th><th>说明</th><th></th></tr></thead><tbody>" +
+    h.map(function (x) {
+      // 回退只挂在最近一次(= 当前 revision)上,且要有更早的一版可回
+      var act = (Number(x.revision) === cur && prev != null)
+        ? '<button class="btn quiet" onclick="rcRollback()">回退这一次(回到 r' + esc(prev) + ")</button>"
+        : '<span class="cfg-when">' + (Number(x.revision) === cur ? "没有更早的版本" : "—") + "</span>";
+      return '<tr><td class="mono">r' + esc(x.revision) + (Number(x.revision) === cur ? ' <span class="chip ok">当前</span>' : "") + "</td>" +
+        "<td>" + esc(when(x.published_at || x.created_at)) + '</td><td class="mob-hide">' + esc(x.published_by || x.actor_email || "—") + "</td>" +
+        "<td>" + esc(x.note || (x.rollback_of != null ? "回退 r" + x.rollback_of : "")) + "</td><td>" + act + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+function renderRcFlags() {
+  var cur = rcSnap(), bi = rcBuiltin();
+  var cf = rcPart(cur, "flags"), bf = rcPart(bi, "flags"), cd = rcPart(cur, "defaults"), bd = rcPart(bi, "defaults");
+  var head = "<thead><tr><th>项</th><th>内置默认</th><th>当前远程</th><th>新值</th><th class=\"mob-hide\">最后改动</th></tr></thead><tbody>";
+  var rows = RC_FLAGS.map(function (f) {
+    return '<tr><td>' + esc(f[1]) + (f[2] ? ' <span class="chip pub" title="匿名 /config/public 也下发">公开</span>' : "") +
+      '<div class="cfg-when mono">flags.' + esc(f[0]) + "</div></td>" +
+      "<td>" + rcShow(bf[f[0]]) + "</td><td>" + (cf[f[0]] === undefined ? '<span class="muted">未设 = 用内置</span>' : "<b>" + rcShow(cf[f[0]]) + "</b>") + "</td>" +
+      '<td><select id="rcF_' + f[0] + '"><option value="">不设(用内置)</option><option value="1">开</option><option value="0">关</option></select></td>' +
+      '<td class="mob-hide">' + rcChanged("flags." + f[0]) + "</td></tr>";
+  }).concat(RC_DEFAULTS.map(function (d) {
+    return '<tr><td>' + esc(d[1]) + '<div class="cfg-when mono">defaults.' + esc(d[0]) + " · " + d[2] + "–" + d[3] + "</div></td>" +
+      "<td>" + rcShow(bd[d[0]]) + "</td><td>" + (cd[d[0]] === undefined ? '<span class="muted">未设 = 用内置</span>' : "<b>" + rcShow(cd[d[0]]) + "</b>") + "</td>" +
+      '<td><input id="rcD_' + d[0] + '" type="number" step="' + d[4] + '" placeholder="空 = 用内置" style="width:110px" oninput="rcNumCheck(\'' + d[0] + '\')">' +
+      '<div id="rcD_' + d[0] + '_msg"></div></td>' +
+      '<td class="mob-hide">' + rcChanged("defaults." + d[0]) + "</td></tr>";
+  })).join("");
+  $("rcFlags").innerHTML = head + rows + "</tbody>";
+  // 值用属性赋(不靠 innerHTML 里的 selected):真 DOM 与哨兵的假 DOM 走同一条路
+  RC_FLAGS.forEach(function (f) { var v = cf[f[0]]; $("rcF_" + f[0]).value = v === true ? "1" : v === false ? "0" : ""; });
+  RC_DEFAULTS.forEach(function (d) { var v = cd[d[0]]; $("rcD_" + d[0]).value = v == null ? "" : String(v); });
+}
+// 数值越界只提醒(服务端会整次拒,原文照摆);页面不替服务端当门
+function rcNumCheck(k) {
+  var d = RC_DEFAULTS.filter(function (x) { return x[0] === k; })[0], raw = ($("rcD_" + k).value || "").trim(), v = Number(raw);
+  var bad = raw !== "" && (!isFinite(v) || v < d[2] || v > d[3]);
+  $("rcD_" + k + "_msg").innerHTML = bad ? '<p class="warnmsg">超出 ' + d[2] + "–" + d[3] + ",服务端会拒绝整次发布。</p>" : "";
+}
+
+function rcStyleText(st) {
+  if (!st || typeof st !== "object") return '<span class="muted">未设 = 用内置</span>';
+  var parts = RC_KNOBS.map(function (k) {
+    var v = st[k[0]]; if (k[0] === "keep_technical") v = v === true ? "1" : v === false ? "0" : v;
+    var o = k[2].filter(function (x) { return x[0] === v; })[0];
+    return o ? o[1] : (v == null ? "—" : String(v));
+  });
+  return esc(parts.join(" · ")) + (st.extra ? '<div class="cfg-diff">extra:「' + esc(st.extra) + "」</div>" : "");
+}
+function renderRcStyles() {
+  var cs = rcPart(rcSnap(), "styles"), bs = rcPart(rcBuiltin(), "styles");
+  $("rcStyles").innerHTML = rcSceneList().map(function (s) {
+    var id = "rcSt_" + s[0];
+    return '<div class="rc-scene' + (cs[s[0]] ? "" : " rc-off") + '" id="' + id + '">' +
+      '<div class="rc-head"><b>' + esc(s[1]) + '</b><span class="muted mono">' + esc(s[0]) + "</span>" +
+      '<label class="rc-check"><input type="checkbox" id="' + id + '_on" onchange="rcSceneToggle(\'' + esc(s[0]) + '\')"> 远程覆盖这个场景</label>' +
+      '<span style="margin-left:auto">' + rcChanged("styles." + s[0]) + "</span></div>" +
+      '<div class="cfg-when">内置:' + rcStyleText(bs[s[0]]) + "</div>" +
+      '<div class="cfg-when">当前远程:' + rcStyleText(cs[s[0]]) + "</div>" +
+      '<div class="rc-knobs">' + RC_KNOBS.map(function (k) {
+        return '<div><label>' + esc(k[1]) + '</label><select id="' + id + "_" + k[0] + '" onchange="rcStylesDirty()">' +
+          k[2].map(function (o) { return '<option value="' + o[0] + '">' + esc(o[1]) + "</option>"; }).join("") + "</select></div>";
+      }).join("") + "</div>" +
+      '<div class="rc-extra" style="margin-top:8px"><label>补充一行(extra,可空)</label>' +
+      '<input type="text" id="' + id + '_extra" spellcheck="false" placeholder="例:像同事之间的口气" oninput="rcExtraShow(\'' + esc(s[0]) + '\')">' +
+      '<div id="' + id + '_msg"></div></div></div>';
+  }).join("");
+  rcSceneList().forEach(function (s) {
+    var st = cs[s[0]] || bs[s[0]] || {};
+    $("rcSt_" + s[0] + "_on").checked = !!cs[s[0]];
+    RC_KNOBS.forEach(function (k) {
+      var v = st[k[0]];
+      if (k[0] === "keep_technical") v = v === true ? "1" : v === false ? "0" : "";
+      $("rcSt_" + s[0] + "_" + k[0]).value = v == null || v === "" ? k[2][0][0] : String(v);
+    });
+    $("rcSt_" + s[0] + "_extra").value = (cs[s[0]] && cs[s[0]].extra) || "";
+  });
+}
+function rcSceneToggle(s) {
+  var on = $("rcSt_" + s + "_on").checked, el = $("rcSt_" + s);
+  if (on) el.classList.remove("rc-off"); else el.classList.add("rc-off");
+  rcStylesDirty();
+}
+
+// extra 的客户端校验:block = 不许发;warn = 黄色提醒、照发
+function rcExtraCheck(s) {
+  s = s == null ? "" : String(s);
+  var out = { block: "", warn: "" };
+  if (Array.from(s).length > RC_EXTRA_MAX) out.block = "超过 " + RC_EXTRA_MAX + " 字(现在 " + Array.from(s).length + ")";
+  else if (/[\r\n\u2028\u2029]/.test(s)) out.block = "不许换行";
+  else if (/[\u0000-\u001f\u007f]/.test(s)) out.block = "不许控制字符";
+  else if (/[{}`]/.test(s)) out.block = "不许花括号 { } 或反引号 `";
+  var m = /ignore|forget|system|assistant/i.exec(s);
+  if (m) out.warn = "含「" + m[0] + "」这类角色词 —— 不拦,但请确认这是在描述风格,不是在改写规则";
+  return out;
+}
+function rcExtraShow(s) {
+  var c = rcExtraCheck($("rcSt_" + s + "_extra").value);
+  $("rcSt_" + s + "_msg").innerHTML = (c.block ? '<p class="err">' + esc(c.block) + "(发布和预览都不会发出)</p>" : "") +
+                                      (c.warn ? '<p class="warnmsg">' + esc(c.warn) + "</p>" : "");
+  rcStylesDirty();
+}
+// 所有覆盖中的场景里,有一条 extra 违规就整份不发;返回违规说明(空 = 可以发)
+function rcExtraBlock() {
+  var bad = [];
+  rcSceneList().forEach(function (s) {
+    if (!$("rcSt_" + s[0] + "_on").checked) return;
+    var c = rcExtraCheck($("rcSt_" + s[0] + "_extra").value);
+    if (c.block) bad.push(s[1] + "(" + s[0] + "):" + c.block);
+    rcExtraShow(s[0]);
+  });
+  return bad.join(";");
+}
+
+function renderRcCopy() {
+  var cc = rcPart(rcSnap(), "copy"), bc = rcPart(rcBuiltin(), "copy");
+  function txt(o, lang) { return o && typeof o === "object" ? o[lang] : (lang === "zh" ? o : undefined); }
+  $("rcCopy").innerHTML = "<thead><tr><th>文案</th><th>内置默认</th><th>当前远程</th><th>新值</th><th class=\"mob-hide\">最后改动</th></tr></thead><tbody>" +
+    RC_COPY.map(function (c) {
+      var b = bc[c[0]], v = cc[c[0]];
+      return "<tr><td>" + esc(c[1]) + '<div class="cfg-when mono">copy.' + esc(c[0]) + "</div></td>" +
+        '<td class="cfg-diff">中:' + rcShow(txt(b, "zh")) + "<br>英:" + rcShow(txt(b, "en")) + "</td>" +
+        '<td class="cfg-diff">' + (v === undefined ? '<span class="muted">未设 = 用内置</span>' : "<b>中:" + rcShow(txt(v, "zh")) + "<br>英:" + rcShow(txt(v, "en")) + "</b>") + "</td>" +
+        '<td><input type="text" id="rcC_' + c[0] + '_zh" maxlength="200" placeholder="中文(空 = 用内置)">' +
+        '<input type="text" id="rcC_' + c[0] + '_en" maxlength="200" placeholder="English" style="margin-top:6px"></td>' +
+        '<td class="mob-hide">' + rcChanged("copy." + c[0]) + "</td></tr>";
+    }).join("") + "</tbody>";
+  RC_COPY.forEach(function (c) {
+    var v = cc[c[0]];
+    $("rcC_" + c[0] + "_zh").value = (txt(v, "zh") || "");
+    $("rcC_" + c[0] + "_en").value = (txt(v, "en") || "");
+  });
+}
+
+// 表单 → 候选快照(只放设了的键;空 = 不下发 = 客户端用内置)
+function rcCandidateStyles() {
+  var out = {};
+  rcSceneList().forEach(function (s) {
+    if (!$("rcSt_" + s[0] + "_on").checked) return;
+    var st = {};
+    RC_KNOBS.forEach(function (k) {
+      var v = $("rcSt_" + s[0] + "_" + k[0]).value;
+      st[k[0]] = k[0] === "keep_technical" ? v === "1" : v;
+    });
+    var ex = $("rcSt_" + s[0] + "_extra").value || "";
+    if (ex !== "") st.extra = ex;                      // ⛔ 不 trim:换行要原样被校验看见
+    out[s[0]] = st;
+  });
+  return out;
+}
+function rcCandidate() {
+  var flags = {}, defaults = {}, copy = {};
+  RC_FLAGS.forEach(function (f) { var v = $("rcF_" + f[0]).value; if (v === "1") flags[f[0]] = true; else if (v === "0") flags[f[0]] = false; });
+  RC_DEFAULTS.forEach(function (d) {
+    var raw = ($("rcD_" + d[0]).value || "").trim();
+    if (raw !== "") defaults[d[0]] = isFinite(Number(raw)) ? Number(raw) : raw;   // 不是数字就原样送,让服务端 400
+  });
+  RC_COPY.forEach(function (c) {
+    var zh = $("rcC_" + c[0] + "_zh").value || "", en = $("rcC_" + c[0] + "_en").value || "";
+    if (zh !== "" || en !== "") copy[c[0]] = { zh: zh, en: en };
+  });
+  return { flags: flags, defaults: defaults, styles: rcCandidateStyles(), copy: copy };
+}
+// 改了哪些:按「块.键」逐条比
+function rcDiff(cur, cand) {
+  var out = [];
+  ["flags", "defaults", "styles", "copy"].forEach(function (part) {
+    var a = rcPart(cur, part), b = rcPart(cand, part), keys = {};
+    Object.keys(a).concat(Object.keys(b)).forEach(function (k) { keys[k] = 1; });
+    Object.keys(keys).sort().forEach(function (k) {
+      if (rcStable(a[k]) !== rcStable(b[k])) out.push(part + "." + k + (b[k] === undefined ? "(删掉 → 用内置)" : ""));
+    });
+  });
+  return out;
+}
+
+function rcStylesDirty() {
+  if (rcPreviewSig != null && rcPreviewSig !== rcStable(rcCandidateStyles())) {
+    $("rcPreviewMsg").innerHTML = '<p class="warnmsg">预览之后场景风格又改过 —— 下面的结果是旧候选的,重新预览再看。</p>';
+  }
+}
+
+// 服务端拒绝的原文:message / code / details 原样摆出来(转义),不翻译、不删减
+function rcServerErr(res) {
+  var j = res.j || {}, code = j.error && typeof j.error === "object" ? j.error.code : (j.code || "");
+  if (res.status === 409 || code === "stale") return "配置已被后来的改动更新,刷新后再试。";
+  var det = (j.error && typeof j.error === "object" && (j.error.details || j.error.errors)) || j.details || j.errors;
+  var d = ""; if (det != null) { try { d = typeof det === "string" ? det : JSON.stringify(det); } catch (e) { d = String(det); } }
+  return "服务端拒绝了(HTTP " + res.status + "):" + cfgErrText(j, res.status) + (d ? "\n" + d : "");
+}
+
+function rcPublish() {
+  if (!rcRemote()) return;
+  var bad = rcExtraBlock();
+  if (bad) { cfgMsg("rcPub", "err", "没发:" + esc(bad)); return; }
+  var cand = rcCandidate(), diff = rcDiff(rcSnap(), cand), cur = rcRev();
+  if (!diff.length) { cfgMsg("rcPub", "note", "和当前 revision " + esc(cur) + " 一样,没什么可发布的。"); return; }
+  if (!confirm("发布 revision " + (cur == null ? "?" : cur + 1) + "?\n\n改了 " + diff.length + " 项:\n  " + diff.join("\n  ") +
+               "\n\n0.53 及以上的客户端下一次刷新 / 下一次听写吃到;非法值服务端会整次拒绝。")) return;
+  var body = { base_revision: cur, note: ($("rcNote").value || "").trim(), snapshot: cand };
+  cfgMsg("rcPub", "note", "发布中…");
+  return cfgPost("remote", body).then(function (res) {
+    if (!cfgClean(res.j)) { cfgMsg("rcPub", "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("远程配置发布回包"); return; }
+    if (!res.ok || (res.j && res.j.ok === false)) {
+      $("rcPubMsg").innerHTML = '<p class="err" style="white-space:pre-wrap">' + esc(rcServerErr(res)) + "<br>(整次没发布,什么都没改)</p>";
+      return;
+    }
+    var nr = res.j && (res.j.revision != null ? res.j.revision : res.j.remote && res.j.remote.revision);
+    cfgMsg("rcPub", "okmsg", "发布了" + (nr != null ? " revision " + esc(nr) : "") + "(" + diff.length + " 项)。客户端下一次刷新吃到。");
+    load();
+  }).catch(function (e) { cfgMsg("rcPub", "err", esc(e.message)); });
+}
+
+function rcRollback() {
+  var cur = rcRev(), prev = rcPrevRevision();
+  if (cur == null || prev == null) { cfgMsg("rcHist", "err", "没有更早的版本可回。"); return; }
+  if (!confirm("回退 revision " + cur + "?\n\n会用 r" + prev + " 的快照生成一个新的 revision " + (cur + 1) + "(历史不改写)。")) return;
+  return cfgPost("remote/rollback", { base_revision: cur, to_revision: prev }).then(function (res) {
+    if (!cfgClean(res.j)) { cfgMsg("rcHist", "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("远程配置回退回包"); return; }
+    if (!res.ok || (res.j && res.j.ok === false)) { $("rcHistMsg").innerHTML = '<p class="err" style="white-space:pre-wrap">' + esc(rcServerErr(res)) + "</p>"; return; }
+    cfgMsg("rcHist", "okmsg", "回退了:现在是 r" + prev + " 的内容" + (res.j && res.j.revision != null ? "(新 revision " + esc(res.j.revision) + ")" : "") + "。");
+    load();
+  }).catch(function (e) { cfgMsg("rcHist", "err", esc(e.message)); });
+}
+
+// 预览:候选 styles × 5 条固定样例,服务端跑与生产一致的组装路径。
+// ⛔ 结果只画进 #rcPreview:不存全局变量、不进 localStorage(换一页 / 刷新就没了,本来就只是给人眼看一次)。
+function rcPreview() {
+  if (!rcRemote()) return;
+  var bad = rcExtraBlock();
+  if (bad) { cfgMsg("rcPreview", "err", "没发:" + esc(bad)); return; }
+  var styles = rcCandidateStyles(), sig = rcStable(styles);
+  $("rcPreviewBtn").disabled = true;
+  cfgMsg("rcPreview", "note", "预览中…(真打模型,最多 10 秒;每分钟最多 6 次)");
+  $("rcPreview").innerHTML = "";
+  return apiFetch(API + "/admin/config/remote/preview", { method: "POST", body: JSON.stringify({ styles: styles }) })
+    .then(cfgJson)
+    .then(function (res) {
+      $("rcPreviewBtn").disabled = false;
+      if (!res.ok || (res.j && res.j.ok === false)) {
+        $("rcPreviewMsg").innerHTML = '<p class="err" style="white-space:pre-wrap">预览没跑成:' + esc(rcServerErr(res)) + "</p>";
+        return;
+      }
+      var rows = (res.j && (res.j.results || res.j.samples)) || [];
+      rcPreviewSig = sig;
+      $("rcPreviewMsg").innerHTML = "";
+      // 免责标签和结果放在同一格:结果在,标签就在(预览后又改了候选,上面那格换成「结果是旧的」,这里不动)
+      $("rcPreview").innerHTML = '<p class="note"><span class="rc-preview-tag">只供人眼看,不是质量证明</span> ' +
+        "用的是上面这份<b>候选</b>(还没发布)。" + (res.j && res.j.cost_micro_usd != null ? " 这次花了 " + esc(usd(res.j.cost_micro_usd)) + "。" : "") + "</p>" +
+        (!rows.length ? '<p class="muted">服务端没回样例结果。</p>' : '<div class="tablebox"><table class="mini"><thead><tr><th>场景</th><th>样例(原话)</th><th>候选整理结果</th></tr></thead><tbody>' +
+        rows.map(function (x) {
+          return '<tr' + (x.error ? ' class="bad"' : "") + '><td class="mono">' + esc(x.scene || "—") + "</td>" +
+            '<td class="cfg-diff">' + esc(x.input || x.sample || "") + "</td>" +
+            '<td class="cfg-diff">' + (x.error ? "出错:" + esc(x.error) : esc(x.output || "")) +
+            (x.latency_ms != null ? ' <span class="cfg-when">' + esc(x.latency_ms) + " ms</span>" : "") + "</td></tr>";
+        }).join("") + "</tbody></table></div>");
+    })
+    .catch(function (e) { $("rcPreviewBtn").disabled = false; cfgMsg("rcPreview", "err", "预览没打出去:" + esc(e.message)); });
 }
 
 </script>
