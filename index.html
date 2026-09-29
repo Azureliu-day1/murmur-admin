@@ -154,12 +154,12 @@ code.hash { cursor: pointer; word-break: break-all; }
 .kv .v { text-align: right; font-variant-numeric: tabular-nums; }
 .act { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line2); }
 .act h4 { font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
-input[type=text], input[type=email], input[type=number], select {
+input[type=text], input[type=email], input[type=number], input[type=password], select, textarea {
   width: 100%; background: var(--bg); color: var(--ink);
   border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px;
   font: inherit; font-size: 13px; margin-bottom: 8px;
 }
-input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--coral); outline-offset: 1px; }
 .btn { border: none; border-radius: 99px; padding: 8px 16px; font: inherit; font-size: 13px;
        font-weight: 500; cursor: pointer; background: var(--coral); color: #fff; }
 .btn:hover { filter: brightness(1.06); }
@@ -234,6 +234,17 @@ input:focus, select:focus { outline: 2px solid var(--coral); outline-offset: 1px
   .chip { padding: 1px 6px; }
   .filters input[type=text] { width: 100%; }
 }
+/* ── 配置(2026-09-29):模型与供应商 / 密钥 / 单价 ─────────────────
+   「试打」没过,「生效」就是灰的 —— 按钮状态本身就是那条规矩。 */
+.cfg-form { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line2); }
+.cfg-form label { display: block; font-size: 11.5px; color: var(--faint); margin-bottom: 3px; }
+.cfg-form .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.cfg-when { font-size: 11px; color: var(--faint); }
+.cfg-diff { max-width: 52ch; word-break: break-all; white-space: pre-wrap; }
+#cfgSec .grid > .card { min-width: 0; }            /* 网格项默认 min-width:auto,宽表会把卡片撑出屏 */
+#cfgSec td .btn { white-space: nowrap; padding: 6px 12px; }
+.cfg-form label { word-break: break-word; }
+@media (max-width: 520px) { .cfg-form .two { grid-template-columns: 1fr; } .cfg-diff { max-width: 22ch; } }
 table.mini{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
 table.mini th,table.mini td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line,#e6e6e6);vertical-align:top}
 table.mini tr.bad td{color:#b0392a}
@@ -359,6 +370,72 @@ table.mini tr.bad td{color:#b0392a}
       <div class="card">
         <div class="eyebrow">plans · <b>档位与定价</b></div>
         <div class="tablebox"><table id="plans"></table></div>
+      </div>
+    </div>
+
+    <!-- ── 配置:模型与供应商 / 密钥 / 单价(2026-09-29)──────────────────
+         改完当场生效:服务端每次写都把 config_version +1,缓存键带版本。
+         ⛔ 页面上的「生效」灰不灰只是提示,真门在服务端(isAdmin + 审计)。
+         整块默认藏着:GET /admin/config 回 403(不是管理员)就一直藏着。 -->
+    <div id="cfgSec" class="hidden">
+      <div class="section hidden" id="cfgAlarm">
+        <div class="eyebrow">config · <b>配置</b></div>
+        <div class="card alarm high" id="cfgAlarmBody"></div>
+      </div>
+      <div class="section hidden" id="cfgErrSec">
+        <div class="eyebrow">config · <b>配置</b></div>
+        <div class="card"><p class="err" id="cfgErr"></p></div>
+      </div>
+      <div id="cfgBody" class="hidden">
+        <div class="section">
+          <div class="eyebrow">models · <b>模型与供应商</b> <span class="muted" id="cfgVer"></span></div>
+          <div class="card">
+            <div class="tablebox"><table id="cfgTiers"></table></div>
+            <div id="cfgTierForm"></div>
+            <div class="tablebox" style="margin-top:16px"><table id="cfgProviders"></table></div>
+            <div class="row" style="margin-top:10px"><button class="btn quiet" onclick="cfgProvEdit('')">加一家供应商</button></div>
+            <div id="cfgProvForm"></div>
+            <div id="cfgModelsMsg"></div>
+            <p class="note">换模型 / 改供应商:先「试打」(真打一次最小请求),回 OK 才能点「生效」。
+              生效后客户端下一次请求就走新的,不用发版。</p>
+          </div>
+        </div>
+        <div class="section grid g2">
+          <div class="card">
+            <div class="eyebrow">keys · <b>密钥</b></div>
+            <div class="tablebox"><table id="cfgKeys"></table></div>
+            <div class="cfg-form">
+              <label for="cfgKeyName">换哪一把</label>
+              <select id="cfgKeyName" onchange="cfgKeyDirty()"></select>
+              <label for="cfgKeyVal">新 key</label>
+              <!-- ⛔ type=password + 不包 <form>:不让浏览器 / 密码管理器记它;
+                   值只在这个输入框里待到「生效」为止,提交后立刻清空,不进 localStorage、URL、日志。 -->
+              <input id="cfgKeyVal" type="password" autocomplete="off" spellcheck="false"
+                     data-lpignore="true" data-1p-ignore placeholder="粘贴上游控制台新建的 key" oninput="cfgKeyDirty()">
+              <div class="row">
+                <button class="btn quiet" onclick="cfgKeyProbe()">试打</button>
+                <button class="btn" id="cfgKeyApply" disabled onclick="cfgKeyApply()">生效</button>
+              </div>
+              <div id="cfgKeyMsg"></div>
+              <p class="note">这里只显示末四位 / 长度 / 指纹前 8 位,库里的值加密存着、回包里永远没有它。<br>
+                <b>旧 key 请到上游控制台吊销</b> —— 这里换掉的只是 Murmur 用哪一把,旧的那把在上游仍然活着。</p>
+            </div>
+          </div>
+          <div class="card">
+            <div class="eyebrow">pricing · <b>单价</b></div>
+            <div class="tablebox"><table id="cfgPricing"></table></div>
+            <div id="cfgPriceMsg"></div>
+            <p class="note">单位是微美元(百万分之一美元)每单位。改了影响<b>下一把 lease 的预扣</b>与之后的结算,已经签出去的不追溯。</p>
+          </div>
+        </div>
+        <div class="section">
+          <div class="eyebrow">config audit · <b>配置改动</b></div>
+          <div class="card">
+            <div class="tablebox"><table id="cfgAudit"></table></div>
+            <div id="cfgAuditMsg"></div>
+            <p class="note">「回退到这一版」= 把这一行改动之前的样子写回去(它自己也会记一行)。密钥不能回退 —— 旧 key 该去上游吊销,不该再用。</p>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -609,6 +686,7 @@ function load() {
   // 申请名额单独一条路由,和统计**并行**拉:它一挂不该把整页拖住,
   // 整页慢也不该让「有人在等回音」这件事跟着晚到。
   loadAccess();
+  loadConfig();          // 配置块同理:自己一条路由,并行拉,挂了不拖整页
   apiFetch(API + "/admin/stats")
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
     .then(function (res) {
@@ -647,6 +725,7 @@ function render() {
   renderAudit(d.audit || []);
   renderInvites(d.invites || []);
   renderProbe(d.invite_attempts);
+  if (CONFIG) renderCfgAudit();   // 配置改动的留痕可能是从 stats 这份里筛的,stats 后到时补画
 }
 
 // ── 异常信号 ──────────────────────────────────────
@@ -1562,6 +1641,448 @@ function accessAct(id, grant) {
       load();
     })
     .catch(function (e) { $("accessMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+// ── 配置:模型与供应商 / 密钥 / 单价 / 回退(2026-09-29)─────────────────────
+// 路由(全部管理员门、全部记审计,action 前缀 config.):
+//   GET  /admin/config                         → {providers[], models{fast,smart}, pricing, keys[], versions}
+//   POST /admin/config/probe    {kind, provider_id?, key_name?, model_id?, …候选}  → {ok, latency_ms, error?}
+//   POST /admin/config/model    {tier, provider_id, model_id}
+//   POST /admin/config/provider {一整行}
+//   POST /admin/config/key      {name, value}     回包只有 last4 / 长度 / sha8
+//   POST /admin/config/pricing  {key, value}
+//   POST /admin/config/rollback {audit_id}        密钥行没有这个按钮
+//
+// 三条规矩写在代码里,不写在人的记性里(哨兵:tools/session-harness.mjs g–l):
+//   ① 「生效」只在**这一份表单内容**试打回 OK 之后才亮;表单一动就重新变灰,
+//      生效函数自己再核一次(按钮灰不灰只是给人看的)。
+//   ② 新 key 只待在那个密码框里:不进全局变量、不进 localStorage / URL / console,
+//      「生效」一按先把框清空再发。签名里只有「第几次改动」,没有值。
+//   ③ 回包里只要出现一段 ≥32 位的连续字母数字(真 key 的形状),整块不画、只报警 ——
+//      契约说服务端永远不回值,它真回了就是服务端出事了,页面不该替它把值摆出来。
+var CONFIG = null;
+var KEYLIKE = /[A-Za-z0-9]{32,}/;
+var cfgProbeOk = {};      // 表单名 → 试打通过时那一份表单的签名
+var cfgKeyGen = 0;        // 密钥框每改一次 +1(签名只用它,不用值)
+var cfgTierCur = "";      // 正在改哪一档
+var cfgProvCur = null;    // 正在改哪一家(null = 没开表单;"" = 新增)
+
+function cfgClean(obj) {
+  var s;
+  try { s = JSON.stringify(obj == null ? null : obj); } catch (e) { return false; }
+  return !KEYLIKE.test(String(s));
+}
+
+function cfgRaiseAlarm(where) {
+  // ⛔ 不打印命中的那一段 —— 报警本身不能变成泄漏的第二条路
+  $("cfgAlarmBody").innerHTML =
+    '<div class="alarm-row"><span class="sig">配置回包里疑似混进了密钥</span>' +
+    '<span class="det">' + esc(where) + ' 里有一段 ≥32 位的连续字母数字。按契约服务端永远不回 key 值,' +
+    '所以这一块已拒绝显示。先别在这台机器上截图 / 转发这一页,去查服务端 /admin/config 的脱敏。</span></div>';
+  $("cfgAlarm").classList.remove("hidden");
+  $("cfgSec").classList.remove("hidden");
+}
+
+function cfgErrText(j, status) {
+  var m = j && (j.error && (j.error.message || j.error) || j.detail || j.message);
+  if (m && typeof m !== "string") { try { m = JSON.stringify(m); } catch (e) { m = ""; } }
+  m = m || ("HTTP " + status);
+  return KEYLIKE.test(m) ? "(错误原文里疑似含密钥,已隐藏;HTTP " + status + ")" : m;
+}
+
+function cfgJson(r) {
+  return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; },
+                       function () { return { ok: false, status: r.status, j: null }; });
+}
+
+function loadConfig() {
+  return apiFetch(API + "/admin/config")
+    .then(cfgJson)
+    .then(function (res) {
+      if (res.status === 401) return;                  // 交给 /admin/stats 那条路统一回登录页
+      if (res.status === 403) {                        // 不是管理员:整块不出现
+        CONFIG = null;
+        $("cfgSec").classList.add("hidden");
+        return;
+      }
+      if (!res.ok) {
+        CONFIG = null;
+        $("cfgSec").classList.remove("hidden");
+        $("cfgBody").classList.add("hidden");
+        $("cfgErr").textContent = "配置没读出来:" + cfgErrText(res.j, res.status);
+        $("cfgErrSec").classList.remove("hidden");
+        return;
+      }
+      if (!cfgClean(res.j)) {
+        CONFIG = null;
+        $("cfgBody").classList.add("hidden");
+        cfgRaiseAlarm("GET /admin/config 回包");
+        return;
+      }
+      CONFIG = res.j || {};
+      $("cfgErrSec").classList.add("hidden");
+      $("cfgAlarm").classList.add("hidden");
+      $("cfgSec").classList.remove("hidden");
+      $("cfgBody").classList.remove("hidden");
+      renderConfig();
+    })
+    .catch(function (e) {
+      $("cfgSec").classList.remove("hidden");
+      $("cfgBody").classList.add("hidden");
+      $("cfgErr").textContent = "配置没读出来:" + e.message;
+      $("cfgErrSec").classList.remove("hidden");
+    });
+}
+
+function cfgProviders(kind) {
+  return ((CONFIG && CONFIG.providers) || []).filter(function (p) { return !kind || p.kind === kind; });
+}
+function cfgProvider(id) {
+  var ps = cfgProviders();
+  for (var i = 0; i < ps.length; i++) if (ps[i].id === id) return ps[i];
+  return null;
+}
+function cfgWhen(iso) { return iso ? '<span class="cfg-when">' + esc(when(iso)) + "</span>" : '<span class="cfg-when">—</span>'; }
+
+// 配置改动的留痕:优先用 /admin/config 自带的 audit(带 id 才能回退);没有就从 /admin/stats 的里筛 config.*
+function cfgAuditRows() {
+  var rows = (CONFIG && Array.isArray(CONFIG.audit)) ? CONFIG.audit : ((DATA && DATA.audit) || []);
+  return rows.filter(function (r) { return String(r.action || "").indexOf("config.") === 0; });
+}
+function cfgLastAudit(target) {
+  var rows = cfgAuditRows();
+  for (var i = 0; i < rows.length; i++) {
+    if (String(rows[i].target || "") === String(target)) {
+      return '<span class="cfg-when">' + esc(rows[i].action) + " · " + esc(rows[i].actor || "—") + " · " + esc(when(rows[i].at || rows[i].created_at)) + "</span>";
+    }
+  }
+  return '<span class="cfg-when">—</span>';
+}
+
+function renderConfig() {
+  var c = CONFIG || {};
+  $("cfgVer").textContent = (c.versions && c.versions.config_version != null) ? "配置版本 " + c.versions.config_version : "";
+  renderCfgTiers();
+  renderCfgProviders();
+  renderCfgKeys();
+  renderCfgPricing();
+  renderCfgAudit();
+  // 每次重画都从「没试打」开始:版本变了,旧的 OK 不算数
+  cfgProbeOk = {};
+  ["cfgTier", "cfgProv", "cfgKey"].forEach(function (f) { cfgSetApply(f, false); });
+  if (cfgTierCur) cfgTierEdit(cfgTierCur); else $("cfgTierForm").innerHTML = "";
+  if (cfgProvCur !== null) cfgProvEdit(cfgProvCur); else $("cfgProvForm").innerHTML = "";
+}
+
+function renderCfgTiers() {
+  var m = (CONFIG && CONFIG.models) || {};
+  var rows = ["fast", "smart"].map(function (t) {
+    var r = m[t] || {};
+    var p = cfgProvider(r.provider_id);
+    return "<tr><td><b>" + (t === "fast" ? "快速" : "高级") + '</b> <span class="muted mono">' + t + "</span></td>" +
+      "<td>" + esc(p ? (p.display_name || p.id) : (r.provider_id || "—")) + "</td>" +
+      '<td class="mono">' + esc(r.model_id || "—") + "</td>" +
+      '<td class="mob-hide">' + cfgWhen(r.updated_at) + "</td>" +
+      '<td class="mob-hide">' + cfgLastAudit(t) + "</td>" +
+      '<td><button class="btn quiet" onclick="cfgTierEdit(\'' + t + '\')">换</button></td></tr>';
+  }).join("");
+  $("cfgTiers").innerHTML = "<thead><tr><th>整理档</th><th>供应商</th><th>模型</th><th class=\"mob-hide\">更新</th><th class=\"mob-hide\">最后一条改动</th><th></th></tr></thead><tbody>" + rows + "</tbody>";
+}
+
+function renderCfgProviders() {
+  var ps = cfgProviders();
+  if (!ps.length) { $("cfgProviders").innerHTML = '<tbody><tr><td class="muted">还没有供应商。</td></tr></tbody>'; return; }
+  $("cfgProviders").innerHTML =
+    "<thead><tr><th>供应商</th><th>类</th><th class=\"mob-hide\">方言</th><th class=\"mob-hide\">端点</th><th>key 名</th><th>启用</th><th class=\"mob-hide\">更新</th><th></th></tr></thead><tbody>" +
+    ps.map(function (p) {
+      return "<tr><td>" + esc(p.display_name || p.id) + ' <span class="muted mono">' + esc(p.id) + "</span></td>" +
+        "<td>" + esc(p.kind) + '</td><td class="mob-hide">' + esc(p.dialect || "—") + "</td>" +
+        '<td class="mono mob-hide cfg-diff">' + esc(p.endpoint || "—") + "</td>" +
+        '<td class="mono">' + esc(p.key_name || "—") + "</td>" +
+        "<td>" + (p.enabled ? '<span class="chip ok">启用</span>' : '<span class="chip">停用</span>') + "</td>" +
+        '<td class="mob-hide">' + cfgWhen(p.updated_at) + "</td>" +
+        '<td><button class="btn quiet" onclick="cfgProvEdit(\'' + esc(p.id) + '\')">编辑</button></td></tr>';
+    }).join("") + "</tbody>";
+}
+
+function renderCfgKeys() {
+  var ks = (CONFIG && CONFIG.keys) || [];
+  $("cfgKeys").innerHTML = !ks.length ? '<tbody><tr><td class="muted">没有密钥记录。</td></tr></tbody>' :
+    "<thead><tr><th>名字</th><th>末四位</th><th class='num mob-hide'>长度</th><th>指纹</th><th class='mob-hide'>更新</th></tr></thead><tbody>" +
+    ks.map(function (k) {
+      return '<tr><td class="mono">' + esc(k.name) + "</td>" +
+        '<td class="mono">' + (k.last4 ? "…" + esc(k.last4) : '<span class="muted">没配</span>') + "</td>" +
+        '<td class="num mob-hide">' + esc(k.len == null ? "—" : k.len) + "</td>" +
+        '<td class="mono">' + esc(k.sha8 || "—") + "</td>" +
+        '<td class="mob-hide">' + cfgWhen(k.updated_at) + "</td></tr>";
+    }).join("") + "</tbody>";
+  var sel = $("cfgKeyName"), keep = sel.value;
+  sel.innerHTML = ks.map(function (k) { return '<option value="' + esc(k.name) + '">' + esc(k.name) + "</option>"; }).join("");
+  if (keep) sel.value = keep;
+}
+
+// pricing 回包形状两种都认:{key: 数} / {key: {micros_per_unit|value, note, updated_at}} / [{key, micros_per_unit, …}]
+function cfgPricingItems() {
+  var p = (CONFIG && CONFIG.pricing) || {};
+  var list = Array.isArray(p) ? p : Object.keys(p).map(function (k) {
+    var v = p[k];
+    return (v && typeof v === "object") ? Object.assign({ key: k }, v) : { key: k, value: v };
+  });
+  return list.map(function (x) {
+    return { key: x.key, value: x.micros_per_unit != null ? x.micros_per_unit : x.value, note: x.note, updated_at: x.updated_at };
+  }).sort(function (a, b) { return String(a.key).localeCompare(String(b.key)); });
+}
+
+function renderCfgPricing() {
+  var items = cfgPricingItems();
+  if (!items.length) { $("cfgPricing").innerHTML = '<tbody><tr><td class="muted">没有单价记录。</td></tr></tbody>'; return; }
+  $("cfgPricing").innerHTML =
+    "<thead><tr><th>项</th><th class='num'>当前</th><th>新值</th><th class='mob-hide'>更新</th><th></th></tr></thead><tbody>" +
+    items.map(function (x, i) {
+      return '<tr><td class="mono">' + esc(x.key) + (x.note ? '<div class="cfg-when">' + esc(x.note) + "</div>" : "") + "</td>" +
+        '<td class="num">' + esc(x.value == null ? "—" : x.value) + "</td>" +
+        '<td><input id="cfgPrice_' + i + '" type="number" min="0" step="1" value="' + esc(x.value == null ? "" : x.value) + '" style="margin:0;width:110px"></td>' +
+        '<td class="mob-hide">' + cfgWhen(x.updated_at) + "</td>" +
+        '<td><button class="btn quiet" onclick="cfgPriceApply(' + i + ')">生效</button></td></tr>';
+    }).join("") + "</tbody>";
+}
+
+function cfgBrief(o) {
+  if (o == null) return "—";
+  var s; try { s = typeof o === "string" ? o : JSON.stringify(o); } catch (e) { s = String(o); }
+  return s.length > 220 ? s.slice(0, 220) + "…" : s;
+}
+
+function renderCfgAudit() {
+  var rows = cfgAuditRows();
+  if (!cfgClean(rows)) {
+    $("cfgAudit").innerHTML = '<tbody><tr><td class="err">配置留痕里疑似混进了密钥,已拒绝显示。</td></tr></tbody>';
+    cfgRaiseAlarm("配置留痕");
+    return;
+  }
+  if (!rows.length) { $("cfgAudit").innerHTML = '<tbody><tr><td class="muted">还没有配置改动。</td></tr></tbody>'; return; }
+  $("cfgAudit").innerHTML =
+    "<thead><tr><th>时间</th><th class=\"mob-hide\">操作人</th><th>动作</th><th>对象</th><th>之前</th><th>之后</th><th></th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      var id = r.id != null ? r.id : r.audit_id;
+      var isKey = /key|secret/i.test(String(r.action || ""));
+      var isRollbackable = !isKey && id != null && r.before != null;
+      var act = isKey ? '<span class="cfg-when">密钥不回退</span>'
+        : isRollbackable ? '<button class="btn quiet" onclick="cfgRollback(\'' + esc(id) + '\')">回退到这一版</button>'
+        : '<span class="cfg-when">—</span>';
+      return "<tr><td>" + esc(when(r.at || r.created_at)) + '</td><td class="mob-hide">' + esc(r.actor || "—") + "</td>" +
+        '<td class="mono">' + esc(r.action) + "</td><td>" + esc(r.target || "—") + "</td>" +
+        '<td class="mono cfg-diff">' + esc(cfgBrief(r.before)) + "</td>" +
+        '<td class="mono cfg-diff">' + esc(cfgBrief(r.after)) + "</td><td>" + act + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+// ── 试打 → 生效 的门 ──────────────────────────────
+function cfgSetApply(form, on) { var b = $(form + "Apply"); if (b) b.disabled = !on; }
+function cfgMsg(form, cls, html) { var el = $(form + "Msg"); if (el) el.innerHTML = '<p class="' + cls + '">' + html + "</p>"; }
+
+// 表单签名:试打时记下,生效时再算一遍,对不上就不许生效。⛔ 密钥表单的签名里没有值。
+function cfgSig(form) {
+  if (form === "cfgTier") return JSON.stringify([cfgTierCur, $("cfgTierProv").value, ($("cfgTierModel").value || "").trim()]);
+  if (form === "cfgProv") return JSON.stringify(cfgProvCandidate());
+  if (form === "cfgKey") return JSON.stringify([$("cfgKeyName").value, cfgKeyGen]);
+  return "";
+}
+function cfgDirty(form) { delete cfgProbeOk[form]; cfgSetApply(form, false); }
+function cfgIsOk(form) { return cfgProbeOk[form] != null && cfgProbeOk[form] === cfgSig(form); }
+
+function cfgRunProbe(form, body) {
+  var sig = cfgSig(form);
+  cfgDirty(form);
+  cfgMsg(form, "note", "试打中…(真打一次最小请求)");
+  return apiFetch(API + "/admin/config/probe", { method: "POST", body: JSON.stringify(body) })
+    .then(cfgJson)
+    .then(function (res) {
+      if (!cfgClean(res.j)) { cfgMsg(form, "err", "试打回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("试打回包"); return; }
+      if (cfgSig(form) !== sig) { cfgMsg(form, "note", "试打回来时表单已经改过了 —— 再试打一次。"); return; }
+      if (res.ok && res.j && res.j.ok === true) {
+        cfgProbeOk[form] = sig;
+        cfgSetApply(form, true);
+        cfgMsg(form, "okmsg", "试打 OK" + (res.j.latency_ms != null ? " · " + esc(res.j.latency_ms) + " ms" : "") + " —— 现在可以点「生效」。");
+      } else {
+        cfgMsg(form, "err", "试打没过:" + esc(cfgErrText(res.j, res.status)));
+      }
+    })
+    .catch(function (e) { cfgMsg(form, "err", "试打没打出去:" + esc(e.message)); });
+}
+
+function cfgPost(path, body) {
+  return apiFetch(API + "/admin/config/" + path, { method: "POST", body: JSON.stringify(body) }).then(cfgJson);
+}
+// 写成功后:表单收起(整块会按新版本重画,表单里的消息会被冲掉),结果写进卡片上常驻的那一格
+function cfgAfterWrite(form, res, okText, doneForm) {
+  if (!cfgClean(res.j)) { cfgMsg(form, "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("写入回包"); return false; }
+  if (!res.ok || (res.j && res.j.ok === false)) { cfgMsg(form, "err", "没生效:" + esc(cfgErrText(res.j, res.status))); return false; }
+  if (form === "cfgTier") cfgTierCur = "";
+  if (form === "cfgProv") cfgProvCur = null;
+  cfgMsg(doneForm || form, "okmsg", okText);
+  load();                                  // 连带重拉 /admin/config(load 里并行拉)和留痕
+  return true;
+}
+
+// ── 整理档换模型 ──
+function cfgTierEdit(t) {
+  cfgTierCur = t;
+  var cur = ((CONFIG && CONFIG.models) || {})[t] || {};
+  var ps = cfgProviders("llm");
+  $("cfgTierForm").innerHTML =
+    '<div class="cfg-form"><div class="two"><div><label>「' + (t === "fast" ? "快速" : "高级") + '」档用哪家</label>' +
+    '<select id="cfgTierProv" onchange="cfgDirty(\'cfgTier\')">' +
+    ps.map(function (p) {
+      return '<option value="' + esc(p.id) + '"' + (p.id === cur.provider_id ? " selected" : "") + (p.enabled ? "" : " disabled") + ">" +
+             esc((p.display_name || p.id) + (p.enabled ? "" : "(停用)")) + "</option>";
+    }).join("") + "</select></div>" +
+    '<div><label>模型 id(照这家的写法)</label><input id="cfgTierModel" type="text" spellcheck="false" value="' + esc(cur.model_id || "") +
+    '" oninput="cfgDirty(\'cfgTier\')"></div></div>' +
+    '<div class="row"><button class="btn quiet" onclick="cfgTierProbe()">试打</button>' +
+    '<button class="btn" id="cfgTierApply" disabled onclick="cfgTierApply()">生效</button>' +
+    '<button class="linkbtn" onclick="cfgTierCur=\'\';$(\'cfgTierForm\').innerHTML=\'\'">收起</button></div>' +
+    '<div id="cfgTierMsg"></div></div>';
+  cfgDirty("cfgTier");
+}
+function cfgTierProbe() {
+  var model = ($("cfgTierModel").value || "").trim();
+  if (!model) { cfgMsg("cfgTier", "err", "模型 id 没填。"); return; }
+  return cfgRunProbe("cfgTier", { kind: "llm", provider_id: $("cfgTierProv").value, model_id: model });
+}
+function cfgTierApply() {
+  if (!cfgIsOk("cfgTier")) { cfgDirty("cfgTier"); cfgMsg("cfgTier", "err", "先试打,回 OK 才能生效。"); return; }
+  var body = { tier: cfgTierCur, provider_id: $("cfgTierProv").value, model_id: ($("cfgTierModel").value || "").trim() };
+  cfgDirty("cfgTier");
+  return cfgPost("model", body).then(function (res) {
+    cfgAfterWrite("cfgTier", res, "生效了:「" + esc(body.tier) + "」档 → " + esc(body.provider_id) + " / " + esc(body.model_id) + "。客户端下一次请求就走它。", "cfgModels");
+  }).catch(function (e) { cfgMsg("cfgTier", "err", esc(e.message)); });
+}
+
+// ── 供应商 ──
+var CFG_DIALECTS = ["openai", "deepseek", "anthropic", "openrouter"];
+function cfgProvEdit(id) {
+  cfgProvCur = id;
+  var p = (id && cfgProvider(id)) || { id: "", kind: "llm", display_name: "", endpoint: "", dialect: "openai", key_name: "",
+                                        default_params: {}, strip_params: [], enabled: true };
+  var keyNames = ((CONFIG && CONFIG.keys) || []).map(function (k) { return k.name; });
+  function inp(fid, label, val, extra) {
+    return '<div><label>' + label + '</label><input id="' + fid + '" type="text" spellcheck="false" value="' + esc(val) +
+           '" oninput="cfgDirty(\'cfgProv\')"' + (extra || "") + "></div>";
+  }
+  var dp = ""; try { dp = JSON.stringify(p.default_params || {}); } catch (e) { dp = "{}"; }
+  $("cfgProvForm").innerHTML =
+    '<div class="cfg-form"><div class="two">' +
+    inp("cfgProvId", "id(英文小写,建好不改)", p.id, id ? " readonly" : "") +
+    inp("cfgProvName", "显示名", p.display_name || "") +
+    '<div><label>类</label><select id="cfgProvKind" onchange="cfgDirty(\'cfgProv\')">' +
+      ["llm", "asr"].map(function (k) { return '<option value="' + k + '"' + (p.kind === k ? " selected" : "") + ">" + k + "</option>"; }).join("") + "</select></div>" +
+    '<div><label>参数方言</label><select id="cfgProvDialect" onchange="cfgDirty(\'cfgProv\')">' +
+      CFG_DIALECTS.map(function (k) { return '<option value="' + k + '"' + (p.dialect === k ? " selected" : "") + ">" + k + "</option>"; }).join("") + "</select></div>" +
+    "</div>" +
+    inp("cfgProvEndpoint", "端点(chat completions 的完整 URL)", p.endpoint || "") +
+    '<div class="two">' +
+    inp("cfgProvKey", "key 名" + (keyNames.length ? "(已有:" + esc(keyNames.join(" / ")) + ")" : ""), p.key_name || "") +
+    inp("cfgProvStrip", "这家不认、要剥掉的参数(逗号分隔)", (p.strip_params || []).join(", ")) +
+    "</div>" +
+    inp("cfgProvParams", "默认参数(JSON)", dp) +
+    '<div class="two">' + inp("cfgProvModel", "试打用哪个模型(只 llm 要填)", "") +
+    '<div><label>启用</label><select id="cfgProvEnabled" onchange="cfgDirty(\'cfgProv\')"><option value="1"' + (p.enabled ? " selected" : "") +
+      '>启用</option><option value="0"' + (p.enabled ? "" : " selected") + ">停用</option></select></div></div>" +
+    '<div class="row"><button class="btn quiet" onclick="cfgProvProbe()">试打</button>' +
+    '<button class="btn" id="cfgProvApply" disabled onclick="cfgProvApply()">生效</button>' +
+    '<button class="linkbtn" onclick="cfgProvCur=null;$(\'cfgProvForm\').innerHTML=\'\'">收起</button></div>' +
+    '<div id="cfgProvMsg"></div></div>';
+  cfgDirty("cfgProv");
+}
+function cfgProvCandidate() {
+  var params = {};
+  try { params = JSON.parse(($("cfgProvParams").value || "").trim() || "{}"); } catch (e) { params = { __bad_json__: true }; }
+  return {
+    id: ($("cfgProvId").value || "").trim(),
+    kind: $("cfgProvKind").value,
+    display_name: ($("cfgProvName").value || "").trim(),
+    endpoint: ($("cfgProvEndpoint").value || "").trim(),
+    dialect: $("cfgProvKind").value === "asr" ? null : $("cfgProvDialect").value,   // 表约束:asr 行方言必须为空
+    key_name: ($("cfgProvKey").value || "").trim(),
+    default_params: params,
+    strip_params: ($("cfgProvStrip").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean),
+    enabled: $("cfgProvEnabled").value === "1"
+  };
+}
+function cfgProvProbe() {
+  var c = cfgProvCandidate();
+  if (!c.id || !c.key_name) { cfgMsg("cfgProv", "err", "id 和 key 名都要填。"); return; }
+  if (c.default_params && c.default_params.__bad_json__) { cfgMsg("cfgProv", "err", "默认参数不是合法 JSON。"); return; }
+  var model = ($("cfgProvModel").value || "").trim();
+  if (c.kind === "llm" && !model) { cfgMsg("cfgProv", "err", "试打 llm 要填一个模型 id。"); return; }
+  // provider = 这一份**还没存**的候选行:试打的是它,不是库里那一行
+  return cfgRunProbe("cfgProv", { kind: c.kind, provider_id: c.id, key_name: c.key_name, model_id: model || undefined, provider: c });
+}
+function cfgProvApply() {
+  if (!cfgIsOk("cfgProv")) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", "先试打,回 OK 才能生效。"); return; }
+  var c = cfgProvCandidate();
+  cfgDirty("cfgProv");
+  return cfgPost("provider", c).then(function (res) {
+    cfgAfterWrite("cfgProv", res, "生效了:供应商 " + esc(c.id) + " 已保存。", "cfgModels");
+  }).catch(function (e) { cfgMsg("cfgProv", "err", esc(e.message)); });
+}
+
+// ── 密钥 ──
+function cfgKeyDirty() { cfgKeyGen++; cfgDirty("cfgKey"); }
+function cfgKeyTarget(name) {
+  var ps = cfgProviders();
+  for (var i = 0; i < ps.length; i++) if (ps[i].key_name === name) return ps[i];
+  return null;
+}
+function cfgKeyProbe() {
+  var name = $("cfgKeyName").value;
+  var p = cfgKeyTarget(name);
+  if (!p) { cfgMsg("cfgKey", "err", "没有哪家供应商用 " + esc(name) + " —— 没法试打,也就不能在这里换。"); return; }
+  if (!$("cfgKeyVal").value) { cfgMsg("cfgKey", "err", "新 key 没填。"); return; }
+  var model = p.kind === "llm" ? (((CONFIG.models || {}).fast || {}).provider_id === p.id ? CONFIG.models.fast.model_id
+                                 : ((CONFIG.models || {}).smart || {}).provider_id === p.id ? CONFIG.models.smart.model_id : undefined) : undefined;
+  // value 直接从框里读进请求体,不经过任何变量
+  return cfgRunProbe("cfgKey", { kind: p.kind, provider_id: p.id, key_name: name, model_id: model, value: $("cfgKeyVal").value });
+}
+function cfgKeyApply() {
+  if (!cfgIsOk("cfgKey")) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", "先试打,回 OK 才能生效。"); return; }
+  var name = $("cfgKeyName").value;
+  var body = JSON.stringify({ name: name, value: $("cfgKeyVal").value });
+  $("cfgKeyVal").value = "";                  // ⛔ 先清框再发:不管成没成功,值都不再留在页面上
+  cfgKeyDirty();
+  return apiFetch(API + "/admin/config/key", { method: "POST", body: body }).then(cfgJson).then(function (res) {
+    body = null;
+    var k = res.j || {};
+    cfgAfterWrite("cfgKey", res, "生效了:" + esc(name) + (k.last4 ? " 现在是 …" + esc(k.last4) : "") +
+      "。<b>旧 key 请到上游控制台吊销。</b>");
+  }).catch(function (e) { body = null; cfgMsg("cfgKey", "err", esc(e.message) + "(框已清空,重新粘贴再试打)"); });
+}
+
+// ── 单价 ──
+function cfgPriceApply(i) {
+  var x = cfgPricingItems()[i];
+  if (!x) return;
+  var raw = ($("cfgPrice_" + i).value || "").trim();
+  var v = Number(raw);
+  if (raw === "" || !isFinite(v) || v < 0 || Math.floor(v) !== v) { cfgMsg("cfgPrice", "err", esc(x.key) + ":要一个 ≥0 的整数(微美元)。"); return; }
+  if (Number(x.value) === v) { cfgMsg("cfgPrice", "note", esc(x.key) + " 没变。"); return; }
+  if (!confirm("把 " + x.key + " 从 " + x.value + " 改成 " + v + "?\n\n这会影响下一把 lease 的预扣和之后的结算(已经签出去的不追溯)。")) return;
+  return cfgPost("pricing", { key: x.key, value: v }).then(function (res) {
+    cfgAfterWrite("cfgPrice", res, "生效了:" + esc(x.key) + " = " + esc(v) + "。");
+  }).catch(function (e) { cfgMsg("cfgPrice", "err", esc(e.message)); });
+}
+
+// ── 回退 ──
+function cfgRollback(id) {
+  var rows = cfgAuditRows(), r = null;
+  for (var i = 0; i < rows.length; i++) if (String(rows[i].id != null ? rows[i].id : rows[i].audit_id) === String(id)) r = rows[i];
+  if (!r) { cfgMsg("cfgAudit", "err", "这一行刚才不见了 —— 刷新一下。"); return; }
+  if (/key|secret/i.test(String(r.action || ""))) { cfgMsg("cfgAudit", "err", "密钥不回退。"); return; }
+  if (!confirm("把 " + (r.target || r.action) + " 回退到这一行改动之前的样子?\n\n之前:" + cfgBrief(r.before))) return;
+  return cfgPost("rollback", { audit_id: r.id != null ? r.id : r.audit_id }).then(function (res) {
+    cfgAfterWrite("cfgAudit", res, "回退了。审计里多了一行。");
+  }).catch(function (e) { cfgMsg("cfgAudit", "err", esc(e.message)); });
 }
 
 </script>
