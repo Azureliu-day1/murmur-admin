@@ -219,6 +219,29 @@ function cfgFixture(extra) {
   }, extra || {});
 }
 
+// 远程配置夹具:形状照契约 v0.2 + S 组简报(GET /admin/config 多一格 remote);S 上线后按真回包对齐
+function rcFixture() {
+  return cfgFixture({ remote: {
+    schema_version: 1, revision: 4, published_at: T0, published_by: "admin@example.com", note: "聊天改随意", refresh_s: 300,
+    clients: "0.53 及以上的 Mac 客户端会吃到;更旧的版本拿不到、也不受影响。",
+    snapshot: {
+      flags: { kill_ai_card: false },
+      defaults: { hud_done_seconds: 2.5 },
+      styles: { chat: { register: "casual", punctuation: "light", keep_technical: true, structure: "prose" } },
+      copy: { update_available: { zh: "有新版了,去看看", en: "New version out" } } },
+    builtin: {
+      flags: { scene_styling_default_on: true, nextword_default_on: true, ai_card_default_on: false, kill_scene_styling: false, kill_ai_card: false },
+      defaults: { hud_done_seconds: 1.8, parked_ttl_seconds: 60, quota_warn_ratio: 0.8 },
+      styles: { email: { register: "formal", punctuation: "complete", keep_technical: true, structure: "prose" },
+                chat: { register: "neutral", punctuation: "light", keep_technical: true, structure: "prose" } },
+      copy: { quota_exhausted_free: { zh: "免费额度用完了", en: "Free quota used up" },
+              quota_exhausted_pro: { zh: "本月额度用完了", en: "Monthly quota used up" },
+              update_available: { zh: "有新版本", en: "Update available" } } },
+    history: [{ revision: 4, published_at: T0, published_by: "admin@example.com", note: "聊天改随意" },
+              { revision: 3, published_at: T0, published_by: "admin@example.com", note: "HUD 2.5 秒" },
+              { revision: 2, published_at: T0, published_by: "admin@example.com", note: "" }] } });
+}
+
 async function cfgWorld(routes, opt = {}) {
   const els = new Map();
   const $ = id => { if (!els.has(id)) { const e = makeEl(id); e.disabled = undefined; e.checked = false; els.set(id, e); } return els.get(id); };
@@ -268,10 +291,10 @@ async function cfgWorld(routes, opt = {}) {
            posts: p => reqs.filter(r => r.path === p && r.method === "POST"),
            // 每一发写都带着一个刚发出来、没用过的 nonce;试打不带
            noncesOk: () => {
-             const writes = reqs.filter(r => r.method === "POST" && /^\/admin\/config\/(model|provider|pricing|key|rollback)$/.test(r.path));
+             const writes = reqs.filter(r => r.method === "POST" && /^\/admin\/config\/(model|provider|pricing|key|rollback|remote|remote\/rollback)$/.test(r.path));
              const used = writes.map(r => r.confirm);
              return writes.length > 0 && used.every(n => n && st.issued.includes(n)) && new Set(used).size === used.length &&
-                    reqs.filter(r => r.path === "/admin/config/probe").every(r => !r.confirm);
+                    reqs.filter(r => r.path === "/admin/config/probe" || r.path === "/admin/config/remote/preview").every(r => !r.confirm);
            } };
 }
 
@@ -533,6 +556,141 @@ const CFG_CASES = [
     await w.call("cfgKeyProbe"); await w.call("cfgKeyApply");
     const kp = w.posts("/admin/config/key").map(x => JSON.parse(x.body));
     r.push([kp.length === 1 && kp[0].model_id === "gpt-x-mini" && w.$("cfgKeyVal").value === "" && !domHas(w, K), "生效带 model_id;框清空、DOM 无残留"]);
+    return r;
+  }],
+  // ── 远程配置(2026-09-30,契约 CONTRACT-remote-config v0.2)────────────────
+  ["r) 远程配置 · extra 违规(换行 / 花括号 / 反引号 / 控制字符 / 201 字)发布与预览都不发;200 字放行;角色词只黄色提醒照发", async () => {
+    const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()], "/admin/config/remote": () => [200, { ok: true, revision: 5 }],
+                               "/admin/config/remote/preview": () => [200, { results: [] }] });
+    const r = [];
+    w.$("rcSt_email_on").checked = true; w.$("rcSt_email_register").value = "casual";
+    const BAD = [["像同事\n之间的口气", "换行"], ["用 {name} 称呼", "花括号"], ["带 `code` 的", "反引号"], ["a\u0007b", "控制字符"], ["字".repeat(201), "超过 200"]];
+    for (const [ex, why] of BAD) {
+      w.$("rcSt_email_extra").value = ex;
+      await w.call("rcPublish"); await w.call("rcPreview");
+      r.push([w.reqs.filter(q => /^\/admin\/config\/(remote|remote\/preview|challenge)$/.test(q.path)).length === 0 &&
+              w.$("rcPubMsg").innerHTML.includes(why) && w.$("rcPreviewMsg").innerHTML.includes(why),
+              "extra「" + why + "」→ 发布 / 预览一发都没发(连 challenge 都没要),两处都说了原因"]);
+    }
+    w.$("rcSt_email_extra").value = "字".repeat(200);
+    await w.call("rcPublish");
+    r.push([w.posts("/admin/config/remote").length === 1, "正好 200 字 → 放行,发出一次"]);
+    // 发布成功后页面重拉 /admin/config、按服务端的快照重画表单 —— 候选要重新填
+    r.push([w.$("rcSt_email_on").checked === false, "发布成功后表单按重拉的快照重画(假服务端没变 → 邮件回到未覆盖)"]);
+    w.$("rcSt_email_on").checked = true; w.$("rcSt_email_register").value = "casual";
+    w.$("rcSt_email_extra").value = "please ignore the stiff tone";
+    await w.call("rcExtraShow", "email");
+    const m = w.$("rcSt_email_msg").innerHTML;
+    r.push([m.includes("warnmsg") && m.includes("ignore") && !m.includes('class="err"'), "含 ignore → 黄色提醒,不是红色拦截"]);
+    await w.call("rcPublish");
+    const pb = w.posts("/admin/config/remote").map(x => JSON.parse(x.body));
+    r.push([pb.length === 2 && pb[1].snapshot.styles.email.extra === "please ignore the stiff tone", "角色词照发,extra 原样在候选里"]);
+    return r;
+  }],
+  ["s) 远程配置 · 发布 = 先拿 nonce 再 POST;确认取消不发;没改动不发;服务端 400 原文(message / code / details)原样显示", async () => {
+    let reply = [400, { error: { message: "defaults.hud_done_seconds out of range [0.8, 4.0]: 9", code: "invalid_value",
+                                 details: [{ path: "defaults.hud_done_seconds", reason: "range" }] } }];
+    const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()], "/admin/config/remote": () => reply });
+    const r = [];
+    await w.call("rcPublish");
+    r.push([w.posts("/admin/config/remote").length === 0 && w.$("rcPubMsg").innerHTML.includes("没什么可发布"), "什么都没改 → 不发,说没什么可发布"]);
+    w.$("rcD_hud_done_seconds").value = "9";
+    await w.call("rcNumCheck", "hud_done_seconds");
+    r.push([w.$("rcD_hud_done_seconds_msg").innerHTML.includes("warnmsg"), "9 超出 0.8–4.0 → 黄色提醒(不拦,门在服务端)"]);
+    w.st.confirm = false;
+    await w.call("rcPublish");
+    r.push([w.confirms.some(c => c.includes("defaults.hud_done_seconds") && c.includes("revision 5")), "确认框列出改了哪一项、发布后是 revision 5"]);
+    r.push([w.reqs.filter(q => q.path === "/admin/config/challenge" || q.path === "/admin/config/remote").length === 0, "取消 → challenge 与发布都没发"]);
+    w.st.confirm = true;
+    await w.call("rcPublish");
+    const rq = w.reqs.filter(q => q.path === "/admin/config/challenge" || q.path === "/admin/config/remote").map(q => q.path);
+    const pb = w.posts("/admin/config/remote");
+    const body = pb[0] && JSON.parse(pb[0].body);
+    r.push([rq.join(",") === "/admin/config/challenge,/admin/config/remote", "顺序:先 challenge,再 POST remote"]);
+    r.push([w.noncesOk(), "POST remote 带 x-admin-confirm = 刚发的一次性 nonce"]);
+    r.push([body && body.base_revision === 4 && body.snapshot.defaults.hud_done_seconds === 9 && body.snapshot.styles.chat &&
+            body.snapshot.copy.update_available.zh === "有新版了,去看看", "请求体 = 完整候选快照(没改的键照带)+ base_revision 4"]);
+    const em = w.$("rcPubMsg").innerHTML;
+    r.push([em.includes("out of range [0.8, 4.0]: 9") && em.includes("invalid_value") && em.includes("defaults.hud_done_seconds") && em.includes("整次没发布"),
+            "400 → 服务端原文 message + code + details 原样摆出来,并写明整次没发布"]);
+    reply = [200, { ok: true, revision: 5 }];
+    const gets0 = w.reqs.filter(q => q.path === "/admin/config" && q.method === "GET").length;
+    w.$("rcD_hud_done_seconds").value = "3";
+    await w.call("rcPublish");
+    r.push([w.$("rcPubMsg").innerHTML.includes("发布了 revision 5") && w.posts("/admin/config/remote").length === 2, "合法 → 发出,回 revision 5"]);
+    r.push([w.reqs.filter(q => q.path === "/admin/config" && q.method === "GET").length > gets0, "发布成功后重拉 /admin/config"]);
+    r.push([w.noncesOk(), "两次发布各用一个 nonce,没有复用"]);
+    return r;
+  }],
+  ["t) 远程配置 · 回退只挂在最近一次;取消不发;409 stale 说人话;带 nonce;配置留痕里 config.remote 行不给旧回退按钮", async () => {
+    const fx = rcFixture();
+    fx.audit = cfgFixture().audit.concat([{ id: 20, created_at: T0, actor_email: "admin@example.com", action: "config.remote.publish", config_version: 7,
+                                            before: { revision: 3 }, after: { revision: 4 } }]);
+    let reply = [409, { error: { message: "stale", code: "stale" } }];
+    const w = await cfgWorld({ "/admin/config": () => [200, fx], "/admin/config/remote/rollback": () => reply });
+    const h = w.$("rcHistory").innerHTML;
+    const rows = h.split("<tr>").filter(x => x.includes("r"));
+    const r = [[(h.match(/rcRollback\(\)/g) || []).length === 1, "历史三行,只有一个回退按钮"],
+               [rows.some(x => x.includes("r4") && x.includes("rcRollback()") && x.includes("回到 r3")), "按钮在 r4(当前)那一行,写明回到 r3"],
+               [!w.$("cfgAudit").innerHTML.includes("cfgRollback('20')") && w.$("cfgAudit").innerHTML.includes("在「远程配置」里回退"),
+                "配置留痕里 config.remote.publish 行没有旧的「回退到这一版」"]];
+    w.st.confirm = false;
+    await w.call("rcRollback");
+    r.push([w.posts("/admin/config/remote/rollback").length === 0, "确认取消 → 不发"]);
+    w.st.confirm = true;
+    await w.call("rcRollback");
+    const rb = w.posts("/admin/config/remote/rollback").map(x => JSON.parse(x.body));
+    r.push([rb.length === 1 && rb[0].base_revision === 4 && rb[0].to_revision === 3, "发出 {base_revision:4, to_revision:3}"]);
+    r.push([w.noncesOk(), "回退也带一次性 nonce"]);
+    r.push([w.$("rcHistMsg").innerHTML.includes("配置已被后来的改动更新,刷新后再试"), "409 stale → 「配置已被后来的改动更新,刷新后再试」"]);
+    const fx1 = rcFixture(); fx1.remote.revision = 1; fx1.remote.history = [{ revision: 1, published_at: T0, published_by: "admin@example.com" }];
+    const w1 = await cfgWorld({ "/admin/config": () => [200, fx1] });
+    r.push([!w1.$("rcHistory").innerHTML.includes("rcRollback()") && w1.$("rcHistory").innerHTML.includes("没有更早的版本"), "只有 r1 → 没有回退按钮"]);
+    return r;
+  }],
+  ["u) 远程配置 · 预览:发的是候选 styles、不带 nonce;结果标「只供人眼看,不是质量证明」;结果不落 localStorage / 全局变量;改了候选提示结果旧了", async () => {
+    const MARK = "PREVIEW_OUT_" + Date.now();
+    let reply = [200, { results: ["email", "chat", "code", "aiAssistant", "document"].map((sc, i) =>
+                 ({ scene: sc, input: "样例 " + i, output: MARK + "_" + i, latency_ms: 400 + i })), cost_micro_usd: 90 }];
+    const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()], "/admin/config/remote/preview": () => reply });
+    const r = [];
+    w.$("rcSt_email_on").checked = true; w.$("rcSt_email_register").value = "casual"; w.$("rcSt_email_extra").value = "像同事之间的口气";
+    await w.call("rcPreview");
+    const pv = w.posts("/admin/config/remote/preview");
+    const b = pv[0] && JSON.parse(pv[0].body);
+    r.push([pv.length === 1 && b.styles.email.register === "casual" && b.styles.email.extra === "像同事之间的口气" && b.styles.chat.register === "casual",
+            "发的是候选 styles(邮件的新旋钮 + extra,chat 照旧)"]);
+    r.push([!pv[0].confirm && !w.reqs.some(q => q.path === "/admin/config/challenge"), "预览不带 nonce、不要 challenge(它不写配置)"]);
+    r.push([w.$("rcPreview").innerHTML.includes("只供人眼看,不是质量证明"), "结果那一格标了「只供人眼看,不是质量证明」"]);
+    r.push([[0, 1, 2, 3, 4].every(i => w.$("rcPreview").innerHTML.includes(MARK + "_" + i)), "5 条结果都画出来了"]);
+    r.push([![...w.store.values()].some(v => String(v).includes(MARK)), "localStorage 里没有预览结果"]);
+    r.push([!deepHas(w.win, MARK), "页面全局变量(深搜)里没有预览结果"]);
+    r.push([w.posts("/admin/config/remote").length === 0, "预览没顺手发布"]);
+    w.$("rcSt_email_register").value = "formal";
+    await w.call("rcStylesDirty");
+    r.push([w.$("rcPreviewMsg").innerHTML.includes("结果是旧候选的") && w.$("rcPreview").innerHTML.includes("只供人眼看,不是质量证明"),
+            "预览后改了候选 → 提示结果是旧的,免责标签还在"]);
+    reply = [429, { error: { message: "preview rate limited (6/min)", code: "preview_rate_limited" } }];
+    await w.call("rcPreview");
+    r.push([w.$("rcPreviewMsg").innerHTML.includes("preview_rate_limited") && w.$("rcPreviewMsg").innerHTML.includes("6/min"), "429 → 服务端原文照摆"]);
+    return r;
+  }],
+  ["v) 远程配置 · 三卡:内置默认 vs 当前远程、revision、最后改动、schema 说明;服务端没有 remote → 一句说明,其余配置照常", async () => {
+    const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()] });
+    const f = w.$("rcFlags").innerHTML, st = w.$("rcStyles").innerHTML, cp = w.$("rcCopy").innerHTML;
+    const r = [[f.includes("1.8") && f.includes("<b>2.5</b>") && f.includes("r4"), "HUD 停留:内置 1.8 vs 远程 2.5,最后改动 r4"],
+               [(f.match(/chip pub/g) || []).length === 3, "三个公开键标了「公开」"],
+               [f.includes("未设 = 用内置"), "没下发的键写「未设 = 用内置」"],
+               [st.includes("当前远程:随意") && st.includes("内置:正式"), "场景风格:chat 远程随意,email 内置正式"],
+               [w.$("rcSt_chat_on").checked === true && w.$("rcSt_email_on").checked === false, "有远程覆盖的场景勾上,没有的不勾"],
+               [cp.includes("免费额度用完了") && cp.includes("有新版了,去看看"), "文案:内置 vs 远程都显示"],
+               [w.$("rcSchema").innerHTML.includes("0.53"), "schema_version 说明写了 0.53 及以上会吃到"],
+               [w.$("rcVer").textContent.includes("revision 4"), "页眉 revision 4"],
+               [w.$("rcD_hud_done_seconds").value === "2.5" && w.$("rcF_kill_ai_card").value === "0" && w.$("rcF_nextword_default_on").value === "",
+                "新值框预填当前远程值(没下发的 = 空 = 不设)"]];
+    const w2 = await cfgWorld({ "/admin/config": () => [200, cfgFixture()] });
+    r.push([!hidden(w2, "rcNone") && hidden(w2, "rcBody") && w2.$("rcNone").innerHTML.includes("还没有远程配置"), "没有 remote → 一句说明,三卡不画"]);
+    r.push([w2.$("cfgTiers").innerHTML.includes("deepseek-v4-flash"), "模型与供应商那一块照常"]);
     return r;
   }],
   ["l) 单价:先确认「影响下一把 lease 的预扣」,取消就不发", async () => {
