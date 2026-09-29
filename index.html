@@ -418,7 +418,8 @@ table.mini tr.bad td{color:#b0392a}
               </div>
               <div id="cfgKeyMsg"></div>
               <p class="note">这里只显示末四位 / 长度 / 指纹前 8 位,库里的值加密存着、回包里永远没有它。<br>
-                <b>旧 key 请到上游控制台吊销</b> —— 这里换掉的只是 Murmur 用哪一把,旧的那把在上游仍然活着。</p>
+                <b>旧 key 请到上游控制台吊销</b> —— 这里换掉的只是 Murmur 用哪一把,旧的那把在上游仍然活着。<br>
+                发信(Resend)与 Stripe webhook 两把本期不在这里换:另一个函数只读控制台里的那份,这里换了会把发信弄断。</p>
             </div>
           </div>
           <div class="card">
@@ -1815,20 +1816,32 @@ function renderCfgProviders() {
     }).join("") + "</tbody>";
 }
 
+// 本期不可改的两把(领导者 2026-09-29 裁决):murmur-stripe 只读 Edge secret,
+// 后台换进 Vault 再去上游吊销旧的,发信 / Stripe 验签会断 —— 显示,但不给换。
+var CFG_KEY_LOCKED = { RESEND_API_KEY: 1, STRIPE_WEBHOOK_SECRET: 1 };
+var CFG_KEY_LOCKED_NOTE = "这两把暂时只能在控制台改";
+function cfgKeyLocked(name) { return !!CFG_KEY_LOCKED[name]; }
+
 function renderCfgKeys() {
   var ks = (CONFIG && CONFIG.keys) || [];
   $("cfgKeys").innerHTML = !ks.length ? '<tbody><tr><td class="muted">没有密钥记录。</td></tr></tbody>' :
     "<thead><tr><th>名字</th><th>末四位</th><th class='num mob-hide'>长度</th><th>指纹</th><th class='mob-hide'>更新</th></tr></thead><tbody>" +
     ks.map(function (k) {
-      return '<tr><td class="mono">' + esc(k.name) + "</td>" +
-        '<td class="mono">' + (k.last4 ? "…" + esc(k.last4) : '<span class="muted">没配</span>') + "</td>" +
+      // 没配 = 「未配置」,不是错误(例:OpenRouter 还没填 key)
+      return '<tr><td class="mono">' + esc(k.name) +
+        (cfgKeyLocked(k.name) ? '<div class="cfg-when">' + CFG_KEY_LOCKED_NOTE + "</div>" : "") + "</td>" +
+        '<td class="mono">' + (k.last4 ? "…" + esc(k.last4) : '<span class="muted">未配置</span>') + "</td>" +
         '<td class="num mob-hide">' + esc(k.len == null ? "—" : k.len) + "</td>" +
         '<td class="mono">' + esc(k.sha8 || "—") + (k.source ? ' <span class="cfg-when">' + esc(k.source) + "</span>" : "") + "</td>" +
         '<td class="mob-hide">' + cfgWhen(k.updated_at) + "</td></tr>";
     }).join("") + "</tbody>";
   var sel = $("cfgKeyName"), keep = sel.value;
-  sel.innerHTML = ks.map(function (k) { return '<option value="' + esc(k.name) + '">' + esc(k.name) + "</option>"; }).join("");
-  if (keep) sel.value = keep;
+  sel.innerHTML = ks.map(function (k) {
+    return '<option value="' + esc(k.name) + '"' + (cfgKeyLocked(k.name) ? " disabled" : "") + ">" + esc(k.name) +
+           (cfgKeyLocked(k.name) ? "(" + CFG_KEY_LOCKED_NOTE + ")" : "") + "</option>";
+  }).join("");
+  var firstOpen = ks.filter(function (k) { return !cfgKeyLocked(k.name); })[0];
+  sel.value = (keep && !cfgKeyLocked(keep)) ? keep : (firstOpen ? firstOpen.name : "");
 }
 
 // pricing 回包形状两种都认:{key: 数} / {key: {micros_per_unit|value, note, updated_at}} / [{key, micros_per_unit, …}]
@@ -2059,9 +2072,9 @@ function cfgKeyTarget(name) {
 }
 function cfgKeyProbe() {
   var name = $("cfgKeyName").value;
+  if (cfgKeyLocked(name)) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", esc(name) + ":" + CFG_KEY_LOCKED_NOTE + "。"); return; }
   var p = cfgKeyTarget(name);
-  if (!p) { cfgMsg("cfgKey", "err", "没有哪家供应商用 " + esc(name) + " —— 没法试打,也就不能在这里换" +
-                   "(发信的 key 另有一个函数只读 Edge secret,在这里换了它也用不上)。"); return; }
+  if (!p) { cfgMsg("cfgKey", "err", "没有哪家供应商用 " + esc(name) + " —— 没法试打,也就不能在这里换。"); return; }
   if (!$("cfgKeyVal").value) { cfgMsg("cfgKey", "err", "新 key 没填。"); return; }
   var model = p.kind === "llm" ? (((CONFIG.models || {}).fast || {}).provider_id === p.id ? CONFIG.models.fast.model_id
                                  : ((CONFIG.models || {}).smart || {}).provider_id === p.id ? CONFIG.models.smart.model_id : undefined) : undefined;
@@ -2071,6 +2084,7 @@ function cfgKeyProbe() {
 function cfgKeyApply() {
   if (!cfgIsOk("cfgKey")) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", "先试打,回 OK 才能生效。"); return; }
   var name = $("cfgKeyName").value;
+  if (cfgKeyLocked(name)) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", esc(name) + ":" + CFG_KEY_LOCKED_NOTE + "。"); return; }
   var body = JSON.stringify({ name: name, value: $("cfgKeyVal").value });
   $("cfgKeyVal").value = "";                  // ⛔ 先清框再发:不管成没成功,值都不再留在页面上
   cfgKeyDirty();

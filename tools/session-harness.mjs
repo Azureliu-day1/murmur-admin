@@ -198,6 +198,7 @@ function cfgFixture(extra) {
                llm_flash_in_per_mtok: 220000, llm_flash_out_per_mtok: 660000 },
     keys: [{ name: "DEEPSEEK_API_KEY", last4: "k9Qz", len: 35, sha8: "0a1b2c3d", updated_at: T0 },
            { name: "OPENROUTER_API_KEY", last4: "m2Wx", len: 73, sha8: "4e5f6a7b", updated_at: T0 },
+           { name: "RESEND_API_KEY", last4: "h5Jk", len: 36, sha8: "6b7c8d9e", updated_at: null, source: "env", used_by: ["mail"] },
            { name: "SONIOX_API_KEY", last4: "p7Rt", len: 64, sha8: "8c9d0e1f", updated_at: T0 }],
     versions: { config_version: 7 },
     audit: [
@@ -407,6 +408,22 @@ const CFG_CASES = [
     r.push([w.posts("/admin/config/probe").length === 1 && w.$("cfgProvApply").disabled === false, "只改显示名 → 试打照常、OK 后亮"]);
     await w.call("cfgProvApply");
     r.push([w.posts("/admin/config/provider").length === 1, "生效 → 一发 POST provider"]);
+    return r;
+  }],
+  ["n) Resend / Stripe webhook 本期不可改:显示但禁用;没配的 key 显示「未配置」不当错误", async () => {
+    const K = fakeKey();
+    const fx = cfgFixture(); fx.keys[1] = { name: "OPENROUTER_API_KEY", configured: false, source: null, len: null, last4: null, sha8: null, updated_at: null, used_by: ["openrouter"] };
+    const w = await cfgWorld({ "/admin/config": () => [200, fx], "/admin/config/probe": () => [200, { ok: true, latency_ms: 200 }],
+                               "/admin/config/key": () => [200, { ok: true, key: {} }] });
+    const sel = w.$("cfgKeyName").innerHTML, tbl = w.$("cfgKeys").innerHTML;
+    const r = [[/value="RESEND_API_KEY" disabled/.test(sel), "下拉里 RESEND 是 disabled"],
+               [tbl.includes("RESEND_API_KEY") && tbl.includes("这两把暂时只能在控制台改"), "表里照常显示,旁边一句只能在控制台改"],
+               [w.$("cfgKeyName").value !== "RESEND_API_KEY", "默认选中的不是被锁的那把"],
+               [tbl.includes("未配置") && !/class="err"/.test(tbl), "OpenRouter 没配 → 「未配置」,不是错误样式"]];
+    w.$("cfgKeyName").value = "RESEND_API_KEY"; w.$("cfgKeyVal").value = K;
+    await w.call("cfgKeyProbe");
+    await w.call("cfgKeyApply");
+    r.push([w.posts("/admin/config/probe").length === 0 && w.posts("/admin/config/key").length === 0, "硬选 RESEND 试打 / 生效 → 一发都不发"]);
     return r;
   }],
   ["l) 单价:先确认「影响下一把 lease 的预扣」,取消就不发", async () => {
