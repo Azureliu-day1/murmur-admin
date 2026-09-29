@@ -654,9 +654,17 @@ const CFG_CASES = [
     r.push([rb.length === 1 && rb[0].expect_revision === 4 && rb[0].to_revision === 3, "发出 {expect_revision:4, to_revision:3}"]);
     r.push([w.noncesOk(), "回退也带一次性 nonce"]);
     r.push([w.$("rcHistMsg").innerHTML.includes("配置已被后来的改动更新,刷新后再试"), "409 stale → 「配置已被后来的改动更新,刷新后再试」"]);
-    const fx1 = rcFixture(); fx1.remote.revision = 1; fx1.remote.history = [{ revision: 1, published_at: T0, published_by: "admin@example.com" }];
+    const fx1 = rcFixture(); fx1.remote.revision = 0; fx1.remote.history = [{ revision: 0, published_at: T0, published_by: null }];
     const w1 = await cfgWorld({ "/admin/config": () => [200, fx1] });
-    r.push([!w1.$("rcHistory").innerHTML.includes("rcRollback()") && w1.$("rcHistory").innerHTML.includes("没有更早的版本"), "只有 r1 → 没有回退按钮"]);
+    r.push([!w1.$("rcHistory").innerHTML.includes("rcRollback()") && w1.$("rcHistory").innerHTML.includes("没有更早的版本") &&
+            w1.$("rcHistory").innerHTML.includes("从未发布"), "只有 r0(从未发布)→ 没有回退按钮"]);
+    // r1 是第一次发布:可以回退到 r0(= 全用内置,服务端认 to_revision 0)
+    const fx2 = rcFixture(); fx2.remote.revision = 1; fx2.remote.history = [{ revision: 1, published_at: T0, published_by: "admin@example.com" }];
+    const w2 = await cfgWorld({ "/admin/config": () => [200, fx2], "/admin/config/remote/rollback": () => [200, { ok: true, revision: 2 }] });
+    await w2.call("rcRollback");
+    const rb2 = w2.posts("/admin/config/remote/rollback").map(x => JSON.parse(x.body));
+    r.push([w2.$("rcHistory").innerHTML.includes("回到 r0") && rb2.length === 1 && rb2[0].to_revision === 0 && rb2[0].expect_revision === 1,
+            "当前 r1 → 可以回退到 r0(to_revision 0 = 从未发布)"]);
     return r;
   }],
   ["u) 远程配置 · 预览:发的是候选 styles、不带 nonce;结果标「只供人眼看,不是质量证明」;结果不落 localStorage / 全局变量;改了候选提示结果旧了", async () => {
