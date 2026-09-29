@@ -1686,6 +1686,7 @@ function cfgRaiseAlarm(where) {
 function cfgErrText(j, status) {
   var m = j && (j.error && (j.error.message || j.error) || j.detail || j.message);
   if (m && typeof m !== "string") { try { m = JSON.stringify(m); } catch (e) { m = ""; } }
+  if (m && j && j.error && typeof j.error === "object" && j.error.code) m += "(" + j.error.code + ")";
   m = m || ("HTTP " + status);
   return KEYLIKE.test(m) ? "(错误原文里疑似含密钥,已隐藏;HTTP " + status + ")" : m;
 }
@@ -1749,11 +1750,18 @@ function cfgAuditRows() {
   var rows = (CONFIG && Array.isArray(CONFIG.audit)) ? CONFIG.audit : ((DATA && DATA.audit) || []);
   return rows.filter(function (r) { return String(r.action || "").indexOf("config.") === 0; });
 }
+// 服务端的配置审计行没有 target 列:对象从快照里认({kind:"model",tier} / {kind:"pricing",key} / {kind:"provider",id} / {kind:"key",name})
+function cfgTarget(r) {
+  if (r.target) return String(r.target);
+  var o = r.after || r.before || {};
+  return String(o.tier || o.key || o.name || o.provider_id || o.id || "");
+}
+function cfgActor(r) { return r.actor || r.actor_email || "—"; }
 function cfgLastAudit(target) {
   var rows = cfgAuditRows();
   for (var i = 0; i < rows.length; i++) {
-    if (String(rows[i].target || "") === String(target)) {
-      return '<span class="cfg-when">' + esc(rows[i].action) + " · " + esc(rows[i].actor || "—") + " · " + esc(when(rows[i].at || rows[i].created_at)) + "</span>";
+    if (rows[i].action !== "config.probe" && cfgTarget(rows[i]) === String(target)) {
+      return '<span class="cfg-when">' + esc(rows[i].action) + " · " + esc(cfgActor(rows[i])) + " · " + esc(when(rows[i].at || rows[i].created_at)) + "</span>";
     }
   }
   return '<span class="cfg-when">—</span>';
@@ -1870,8 +1878,8 @@ function renderCfgAudit() {
       var act = isKey ? '<span class="cfg-when">密钥不回退</span>'
         : isRollbackable ? '<button class="btn quiet" onclick="cfgRollback(\'' + esc(id) + '\')">回退到这一版</button>'
         : '<span class="cfg-when">—</span>';
-      return "<tr><td>" + esc(when(r.at || r.created_at)) + '</td><td class="mob-hide">' + esc(r.actor || "—") + "</td>" +
-        '<td class="mono">' + esc(r.action) + "</td><td>" + esc(r.target || "—") + "</td>" +
+      return "<tr><td>" + esc(when(r.at || r.created_at)) + '</td><td class="mob-hide">' + esc(cfgActor(r)) + "</td>" +
+        '<td class="mono">' + esc(r.action) + "</td><td>" + esc(cfgTarget(r) || "—") + "</td>" +
         '<td class="mono cfg-diff">' + esc(cfgBrief(r.before)) + "</td>" +
         '<td class="mono cfg-diff">' + esc(cfgBrief(r.after)) + "</td><td>" + act + "</td></tr>";
     }).join("") + "</tbody>";
@@ -2016,8 +2024,20 @@ function cfgProvProbe() {
   if (c.default_params && c.default_params.__bad_json__) { cfgMsg("cfgProv", "err", "默认参数不是合法 JSON。"); return; }
   var model = ($("cfgProvModel").value || "").trim();
   if (c.kind === "llm" && !model) { cfgMsg("cfgProv", "err", "试打 llm 要填一个模型 id。"); return; }
-  // provider = 这一份**还没存**的候选行:试打的是它,不是库里那一行
-  return cfgRunProbe("cfgProv", { kind: c.kind, provider_id: c.id, key_name: c.key_name, model_id: model || undefined, provider: c });
+  // ⚠️ 服务端的试打打的是**库里已存的那一行**(端点 / 方言 / 参数从表里取,只有 key 名可以临时换)。
+  //    所以新加的一家、或改了端点 / 方言 / 参数的,试打试不到这份改动 —— 这时候不给「OK」,
+  //    否则「试打 OK」证明的是旧配置,生效的却是新配置。
+  var cur = cfgProvider(c.id);
+  var same = cur && cur.kind === c.kind && (cur.endpoint || "") === c.endpoint && (cur.dialect || null) === (c.dialect || null) &&
+             JSON.stringify(cur.strip_params || []) === JSON.stringify(c.strip_params) &&
+             JSON.stringify(cur.default_params || {}) === JSON.stringify(c.default_params);
+  if (!same) {
+    cfgDirty("cfgProv");
+    cfgMsg("cfgProv", "err", cur ? "改了端点 / 方言 / 参数:服务端的试打只打已保存的那一行,试不到这份改动,所以这里不能生效。"
+                                 : "新加的一家:服务端的试打只打已保存的供应商,新行没法先试打,所以这里不能生效。");
+    return;
+  }
+  return cfgRunProbe("cfgProv", { kind: c.kind, provider_id: c.id, key_name: c.key_name, model_id: model || undefined });
 }
 function cfgProvApply() {
   if (!cfgIsOk("cfgProv")) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", "先试打,回 OK 才能生效。"); return; }
@@ -2053,7 +2073,7 @@ function cfgKeyApply() {
   cfgKeyDirty();
   return apiFetch(API + "/admin/config/key", { method: "POST", body: body }).then(cfgJson).then(function (res) {
     body = null;
-    var k = res.j || {};
+    var k = (res.j && res.j.key) || {};
     cfgAfterWrite("cfgKey", res, "生效了:" + esc(name) + (k.last4 ? " 现在是 …" + esc(k.last4) : "") +
       "。<b>旧 key 请到上游控制台吊销。</b>");
   }).catch(function (e) { body = null; cfgMsg("cfgKey", "err", esc(e.message) + "(框已清空,重新粘贴再试打)"); });
@@ -2079,7 +2099,7 @@ function cfgRollback(id) {
   for (var i = 0; i < rows.length; i++) if (String(rows[i].id != null ? rows[i].id : rows[i].audit_id) === String(id)) r = rows[i];
   if (!r) { cfgMsg("cfgAudit", "err", "这一行刚才不见了 —— 刷新一下。"); return; }
   if (/key|secret/i.test(String(r.action || ""))) { cfgMsg("cfgAudit", "err", "密钥不回退。"); return; }
-  if (!confirm("把 " + (r.target || r.action) + " 回退到这一行改动之前的样子?\n\n之前:" + cfgBrief(r.before))) return;
+  if (!confirm("把 " + (cfgTarget(r) || r.action) + " 回退到这一行改动之前的样子?\n\n之前:" + cfgBrief(r.before))) return;
   return cfgPost("rollback", { audit_id: r.id != null ? r.id : r.audit_id }).then(function (res) {
     cfgAfterWrite("cfgAudit", res, "回退了。审计里多了一行。");
   }).catch(function (e) { cfgMsg("cfgAudit", "err", esc(e.message)); });

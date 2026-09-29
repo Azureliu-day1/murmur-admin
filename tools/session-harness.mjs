@@ -201,10 +201,15 @@ function cfgFixture(extra) {
            { name: "SONIOX_API_KEY", last4: "p7Rt", len: 64, sha8: "8c9d0e1f", updated_at: T0 }],
     versions: { config_version: 7 },
     audit: [
-      { id: "a1", at: T0, actor: "admin@example.com", action: "config.model", target: "smart",
-        before: { provider_id: "deepseek", model_id: "deepseek-v4-flash" }, after: { provider_id: "openrouter", model_id: "x/y" } },
-      { id: "a2", at: T0, actor: "admin@example.com", action: "config.key", target: "SONIOX_API_KEY",
-        before: { last4: "p7Rt", sha8: "8c9d0e1f" }, after: { last4: "n3Vb", sha8: "2a3b4c5d" } },
+      // 形状照服务端 GET /admin/config 的 audit:数字 id、actor_email、created_at,没有 target 列(对象在快照里)
+      { id: 11, created_at: T0, actor_email: "admin@example.com", action: "config.model", reason: null,
+        before: { kind: "model", tier: "smart", provider_id: "deepseek", model_id: "deepseek-v4-flash" },
+        after: { kind: "model", tier: "smart", provider_id: "openrouter", model_id: "x/y" } },
+      { id: 12, created_at: T0, actor_email: "admin@example.com", action: "config.key", reason: null,
+        before: { kind: "key", name: "SONIOX_API_KEY", last4: "p7Rt", sha8: "8c9d0e1f" },
+        after: { kind: "key", name: "SONIOX_API_KEY", last4: "n3Vb", sha8: "2a3b4c5d" } },
+      { id: 13, created_at: T0, actor_email: "admin@example.com", action: "config.probe", reason: null,
+        before: null, after: { kind: "llm", provider_id: "deepseek", ok: true, latency_ms: 300 } },
     ],
   }, extra || {});
 }
@@ -361,17 +366,46 @@ const CFG_CASES = [
   ["k) 回退:配置行有按钮、密钥行没有;回退发的是那一行的 audit_id", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/rollback": () => [200, { ok: true }] });
     const html = w.$("cfgAudit").innerHTML;
-    const r = [[html.includes("cfgRollback('a1')"), "config.model 行有「回退到这一版」"],
-               [!html.includes("cfgRollback('a2')"), "config.key 行没有回退按钮"]];
-    await w.call("cfgRollback", "a2");
+    const r = [[html.includes("cfgRollback('11')"), "config.model 行有「回退到这一版」"],
+               [!html.includes("cfgRollback('12')"), "config.key 行没有回退按钮"],
+               [!html.includes("cfgRollback('13')"), "config.probe 行(没有 before)没有回退按钮"],
+               [w.$("cfgTiers").innerHTML.includes("config.model"), "「高级」档那一行显示了最后一条改动"]];
+    await w.call("cfgRollback", "12");
     r.push([w.posts("/admin/config/rollback").length === 0, "硬调密钥行的回退 → 不发"]);
     w.st.confirm = false;
-    await w.call("cfgRollback", "a1");
+    await w.call("cfgRollback", "11");
     r.push([w.posts("/admin/config/rollback").length === 0, "确认框点了取消 → 不发"]);
     w.st.confirm = true;
-    await w.call("cfgRollback", "a1");
+    await w.call("cfgRollback", "11");
     const rb = w.posts("/admin/config/rollback");
-    r.push([rb.length === 1 && JSON.parse(rb[0].body).audit_id === "a1", "确认后恰好一发 rollback {audit_id:a1}"]);
+    r.push([rb.length === 1 && JSON.parse(rb[0].body).audit_id === 11, "确认后恰好一发 rollback {audit_id:11}(数字,照服务端的 id)"]);
+    return r;
+  }],
+  ["m) 供应商:服务端试打只打已存的那一行 —— 新加的 / 改了端点的不给 OK;没改的照常试打", async () => {
+    const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
+                               "/admin/config/provider": () => [200, { ok: true }] });
+    const r = [];
+    const fill = (id, endpoint) => {
+      w.$("cfgProvId").value = id; w.$("cfgProvKind").value = "llm"; w.$("cfgProvName").value = "X";
+      w.$("cfgProvEndpoint").value = endpoint; w.$("cfgProvDialect").value = "openai"; w.$("cfgProvKey").value = "OPENROUTER_API_KEY";
+      w.$("cfgProvStrip").value = "thinking, reasoning_effort"; w.$("cfgProvParams").value = "{}"; w.$("cfgProvModel").value = "x/y";
+      w.$("cfgProvEnabled").value = "1";
+    };
+    await w.call("cfgProvEdit", "");
+    fill("newco", "https://api.example.com/v1/chat/completions");
+    await w.call("cfgProvProbe");
+    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgProvApply").disabled === true, "新加的一家 → 不发试打、生效灰"]);
+    await w.call("cfgProvApply");
+    r.push([w.posts("/admin/config/provider").length === 0, "硬点生效 → 不发"]);
+    await w.call("cfgProvEdit", "openrouter");
+    fill("openrouter", "https://api.example.com/v1/chat/completions");
+    await w.call("cfgProvProbe");
+    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgProvApply").disabled === true, "改了端点 → 不发试打、生效灰"]);
+    fill("openrouter", "https://openrouter.ai/api/v1/chat/completions");
+    await w.call("cfgProvProbe");
+    r.push([w.posts("/admin/config/probe").length === 1 && w.$("cfgProvApply").disabled === false, "只改显示名 → 试打照常、OK 后亮"]);
+    await w.call("cfgProvApply");
+    r.push([w.posts("/admin/config/provider").length === 1, "生效 → 一发 POST provider"]);
     return r;
   }],
   ["l) 单价:先确认「影响下一把 lease 的预扣」,取消就不发", async () => {
