@@ -1899,8 +1899,12 @@ function renderCfgAudit() {
       var id = r.id != null ? r.id : r.audit_id;
       var isKey = /key|secret/i.test(String(r.action || ""));
       var isRollbackable = !isKey && id != null && r.before != null;
+      // 服务端只许回退「最近一次改动」(审计行的 config_version = 当前版本,否则 409 stale);行上没带版本就不预判
+      var curVer = CONFIG && CONFIG.versions && CONFIG.versions.config_version;
+      var isLatest = r.config_version == null || curVer == null || Number(r.config_version) === Number(curVer);
       var act = isKey ? '<span class="cfg-when">密钥不回退</span>'
-        : isRollbackable ? '<button class="btn quiet" onclick="cfgRollback(\'' + esc(id) + '\')">回退到这一版</button>'
+        : (isRollbackable && isLatest) ? '<button class="btn quiet" onclick="cfgRollback(\'' + esc(id) + '\')">回退到这一版</button>'
+        : isRollbackable ? '<span class="cfg-when" title="之后配置又改过;只有最近一次改动能回退">之后又改过</span>'
         : '<span class="cfg-when">—</span>';
       return "<tr><td>" + esc(when(r.at || r.created_at)) + '</td><td class="mob-hide">' + esc(cfgActor(r)) + "</td>" +
         '<td class="mono">' + esc(r.action) + "</td><td>" + esc(cfgTarget(r) || "—") + "</td>" +
@@ -2166,8 +2170,8 @@ function cfgKeyApply() {
   return cfgPost("key", body).then(function (res) {
     body = null;
     var k = (res.j && res.j.key) || {};
-    cfgAfterWrite("cfgKey", res, "生效了:" + esc(name) + (k.last4 ? " 现在是 …" + esc(k.last4) : "") +
-      "。<b>新 key 生效后请在上游吊销旧 key;在途请求可能失败一两次。</b>");
+    cfgAfterWrite("cfgKey", res, "生效了:" + esc(name) + (k.last4 ? " 现在是 …" + esc(k.last4) : "") + "。<b>" +
+      esc((res.j && res.j.reminder) || "新 key 生效后请在上游吊销旧 key;在途请求可能失败一两次。") + "</b>");
   }).catch(function (e) { body = null; cfgMsg("cfgKey", "err", esc(e.message) + "(框已清空,重新粘贴再试打)"); });
 }
 

@@ -205,7 +205,9 @@ function cfgFixture(extra) {
     versions: { config_version: 7 },
     audit: [
       // 形状照服务端 GET /admin/config 的 audit:数字 id、actor_email、created_at,没有 target 列(对象在快照里)
-      { id: 11, created_at: T0, actor_email: "admin@example.com", action: "config.model", reason: null,
+      { id: 10, created_at: T0, actor_email: "admin@example.com", action: "config.pricing", reason: null, config_version: 6,
+        before: { kind: "pricing", key: "asr_rt_micros_per_second", micros_per_unit: 50 }, after: { kind: "pricing", key: "asr_rt_micros_per_second", micros_per_unit: 55 } },
+      { id: 11, created_at: T0, actor_email: "admin@example.com", action: "config.model", reason: null, config_version: 7,
         before: { kind: "model", tier: "smart", provider_id: "deepseek", model_id: "deepseek-v4-flash" },
         after: { kind: "model", tier: "smart", provider_id: "openrouter", model_id: "x/y" } },
       { id: 12, created_at: T0, actor_email: "admin@example.com", action: "config.key", reason: null,
@@ -338,7 +340,8 @@ const CFG_CASES = [
   ["i) 换 key:提交后框空了,DOM / 全局变量 / localStorage / URL / console / 其它请求里都找不到它", async () => {
     const K = fakeKey();
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 240 }],
-                               "/admin/config/key": () => [200, { ok: true, name: "SONIOX_API_KEY", last4: "n3Vb", len: 40, sha8: "2a3b4c5d" }] });
+                               "/admin/config/key": () => [200, { ok: true, key: { name: "SONIOX_API_KEY", last4: "n3Vb", len: 40, sha8: "2a3b4c5d" },
+                                         reminder: "新 key 生效后请在上游控制台吊销旧 key;切换那一刻在途的请求可能失败一两次。我们这边不留旧值。" }] });
     const r = [];
     w.$("cfgKeyName").value = "SONIOX_API_KEY"; w.$("cfgKeyVal").value = K;
     await w.call("cfgKeyApply");
@@ -357,7 +360,8 @@ const CFG_CASES = [
     r.push([!w.reqs.some(q => q.url.includes(K)), "任何请求 URL 里都没有它"]);
     r.push([!w.reqs.some(q => q.body && q.body.includes(K) && !["/admin/config/probe", "/admin/config/key"].includes(q.path)), "只出现在 probe / key 两发请求体里"]);
     r.push([!w.out.some(l => l.includes(K)), "console / alert 里没有它"]);
-    r.push([w.$("cfgKeyMsg").innerHTML.includes("吊销") && w.$("cfgKeyMsg").innerHTML.includes("在途请求"), "生效后提醒去上游吊销旧 key、在途请求可能失败"]);
+    r.push([w.$("cfgKeyMsg").innerHTML.includes("吊销") && w.$("cfgKeyMsg").innerHTML.includes("我们这边不留旧值") && w.$("cfgKeyMsg").innerHTML.includes("n3Vb"),
+            "生效后原样显示服务端的 reminder(吊销旧 key / 在途请求)与新末四位"]);
     r.push([w.noncesOk(), "换 key 那一发也带一次性 nonce"]);
     r.push([!w.reqs.some(q => q.path === "/admin/config/challenge" && q.body && q.body.includes(K)), "challenge 请求里没有 key"]);
     await w.call("cfgKeyApply");
@@ -389,6 +393,7 @@ const CFG_CASES = [
     const r = [[html.includes("cfgRollback('11')"), "config.model 行有「回退到这一版」"],
                [!html.includes("cfgRollback('12')"), "config.key 行没有回退按钮"],
                [!html.includes("cfgRollback('13')"), "config.probe 行(没有 before)没有回退按钮"],
+               [!html.includes("cfgRollback('10')") && html.includes("之后又改过"), "不是最新那条(config_version 6 ≠ 当前 7)→ 没有回退按钮,写「之后又改过」"],
                [w.$("cfgTiers").innerHTML.includes("config.model"), "「高级」档那一行显示了最后一条改动"]];
     await w.call("cfgRollback", "12");
     r.push([w.posts("/admin/config/rollback").length === 0, "硬调密钥行的回退 → 不发"]);
