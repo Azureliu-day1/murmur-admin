@@ -203,7 +203,6 @@ function cfgFixture(extra) {
            { name: "RESEND_API_KEY", last4: "h5Jk", len: 36, sha8: "6b7c8d9e", updated_at: null, source: "env", used_by: ["mail"] },
            { name: "SONIOX_API_KEY", last4: "p7Rt", len: 64, sha8: "8c9d0e1f", updated_at: T0 }],
     versions: { config_version: 7 },
-    host_allowlist: ["api.deepseek.com", "openrouter.ai", "api.openai.com", "api.soniox.com"],
     audit: [
       // 形状照服务端 GET /admin/config 的 audit:数字 id、actor_email、created_at,没有 target 列(对象在快照里)
       { id: 11, created_at: T0, actor_email: "admin@example.com", action: "config.model", reason: null,
@@ -408,38 +407,49 @@ const CFG_CASES = [
     r.push([w2.$("cfgAuditMsg").innerHTML.includes("配置已被后来的改动更新,刷新后再试"), "409 stale → 「配置已被后来的改动更新,刷新后再试」"]);
     return r;
   }],
-  ["m) 供应商:试打带的是候选行;端点 host 不在允许清单 → 不发试打;方言只有 openai_compatible", async () => {
+  ["m) 供应商:只改已有那一家;host 不在白名单不发;改了端点 / 参数 = 试打并生效(服务端先用候选试);只改显示名照常先试打", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
                                "/admin/config/provider": () => [200, { ok: true }] });
-    const r = [[!w.$("cfgProviders").innerHTML.includes("cfgProvEdit('soniox')") && w.$("cfgProviders").innerHTML.includes("cfgProvEdit('deepseek')"),
-                "识别底座(asr 行)没有「编辑」(服务端 400 asr_locked),llm 行有"]];
-    const fill = (id, endpoint) => {
-      w.$("cfgProvId").value = id; w.$("cfgProvKind").value = "llm"; w.$("cfgProvName").value = "X";
-      w.$("cfgProvEndpoint").value = endpoint; w.$("cfgProvDialect").value = "openai_compatible"; w.$("cfgProvKey").value = "OPENAI_API_KEY";
-      w.$("cfgProvStrip").value = "thinking, reasoning_effort"; w.$("cfgProvParams").value = "{}"; w.$("cfgProvModel").value = "gpt-x";
+    const tbl = w.$("cfgProviders").innerHTML;
+    const r = [[!tbl.includes("cfgProvEdit('soniox')") && tbl.includes("cfgProvEdit('deepseek')"), "识别底座(asr 行)没有「编辑」(服务端 asr_locked),llm 行有"]];
+    await w.call("cfgProvEdit", "openrouter");
+    const form = w.$("cfgProvForm").innerHTML;
+    const dsel = (form.match(/<select id="cfgProvDialect"[\s\S]*?<\/select>/) || [""])[0];
+    r.push([(dsel.match(/<option /g) || []).length === 1 && dsel.includes('value="openai_compatible"'), "方言下拉只有 openai_compatible"]);
+    r.push([/id="cfgProvId"[^>]*readonly/.test(form) && /id="cfgProvKey"[^>]*readonly/.test(form) && /id="cfgProvDialect" disabled/.test(form),
+            "id / key 名只读、方言不可选(只能迁移改)"]);
+    const fill = (endpoint, name) => {
+      w.$("cfgProvId").value = "openrouter"; w.$("cfgProvName").value = name || "OpenRouter";
+      w.$("cfgProvEndpoint").value = endpoint; w.$("cfgProvKey").value = "OPENROUTER_API_KEY";
+      w.$("cfgProvStrip").value = "thinking, reasoning_effort"; w.$("cfgProvParams").value = "{}"; w.$("cfgProvModel").value = "";
       w.$("cfgProvEnabled").value = "1";
     };
-    await w.call("cfgProvEdit", "");
-    const form = w.$("cfgProvForm").innerHTML;
-    r.push([form.includes('value="openai_compatible"') && !/value="(anthropic|deepseek|openrouter|openai)"/.test(form), "方言下拉只有 openai_compatible"]);
-    fill("newco", "https://api.example.com/v1/chat/completions");
+    fill("https://api.example.com/v1/chat/completions");
     await w.call("cfgProvProbe");
-    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgProvMsg").innerHTML.includes("不在允许清单"), "host 不在允许清单 → 不发试打、当场提示"]);
     await w.call("cfgProvApply");
-    r.push([w.posts("/admin/config/provider").length === 0, "硬点生效 → 不发"]);
-    fill("newco", "http://api.openai.com/v1/chat/completions");
+    r.push([w.posts("/admin/config/probe").length === 0 && w.posts("/admin/config/provider").length === 0 &&
+            w.$("cfgProvMsg").innerHTML.includes("不在允许清单"), "host 不在白名单 → 不发试打、不发写、当场提示"]);
+    fill("https://openrouter.ai/api/v2/chat/completions");
     await w.call("cfgProvProbe");
-    r.push([w.posts("/admin/config/probe").length === 0, "不是 https → 不发试打"]);
-    fill("newco", "https://api.openai.com/v1/chat/completions");
+    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgProvApply").disabled === false && w.$("cfgProvMsg").innerHTML.includes("试打并生效"),
+            "改了端点(host 在白名单)→ 不发 /probe(它只打已存那一行),按钮变成试打并生效"]);
+    w.st.confirm = false;
+    await w.call("cfgProvApply");
+    r.push([w.posts("/admin/config/provider").length === 0, "确认框取消 → 不发"]);
+    w.st.confirm = true;
+    await w.call("cfgProvApply");
+    const pp = w.posts("/admin/config/provider").map(x => JSON.parse(x.body));
+    r.push([pp.length === 1 && pp[0].endpoint === "https://openrouter.ai/api/v2/chat/completions" && !("key_name" in pp[0]) && !("kind" in pp[0]) &&
+            !("dialect" in pp[0]) && w.noncesOk(), "确认 → 一发 POST provider(带 nonce),只带服务端收的字段"]);
+    await w.call("cfgProvEdit", "openrouter");
+    fill("https://openrouter.ai/api/v1/chat/completions", "OpenRouter(备用)");
+    await w.call("cfgProvApply");
+    r.push([w.posts("/admin/config/provider").length === 1, "只改显示名、没试打 → 生效不发"]);
     await w.call("cfgProvProbe");
     const pb = w.posts("/admin/config/probe").map(x => JSON.parse(x.body));
-    r.push([pb.length === 1 && pb[0].provider && pb[0].provider.endpoint === "https://api.openai.com/v1/chat/completions" && pb[0].provider.id === "newco",
-            "新加一家(host 在清单里)→ 试打请求带着这份候选行"]);
-    r.push([w.$("cfgProvApply").disabled === false, "候选试打 OK → 生效亮"]);
+    r.push([pb.length === 1 && pb[0].provider_id === "openrouter" && !("provider" in pb[0]), "只改显示名 → 照常 /probe 那一家"]);
     await w.call("cfgProvApply");
-    const pp = w.posts("/admin/config/provider");
-    r.push([pp.length === 1 && JSON.parse(pp[0].body).endpoint === "https://api.openai.com/v1/chat/completions" && w.noncesOk(),
-            "生效 → 一发 POST provider(带 nonce),写的就是试打过的那一份"]);
+    r.push([w.posts("/admin/config/provider").length === 2, "试打 OK 后生效 → 发出"]);
     return r;
   }],
   ["n) Resend / Stripe webhook 本期不可改:显示但禁用;没配的 key 显示「未配置」不当错误", async () => {
@@ -460,7 +470,7 @@ const CFG_CASES = [
   }],
   ["o) 生效时服务端先试后写没过(400 probe_failed)→ 显示归一化错误,不说成功", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
-      "/admin/config/model": () => [400, { probes: [{ provider_id: "openrouter", model_id: "x/y", ok: false, error: "HTTP 404 · model_not_found" }],
+      "/admin/config/model": () => [400, { probe: { ok: false, latency_ms: 812, error: "HTTP 404 · model_not_found" },
                                            error: { message: "候选配置试打没通过 —— 没有保存", code: "probe_failed" } }] });
     await w.call("cfgTierEdit", "smart");
     w.$("cfgTierProv").value = "openrouter"; w.$("cfgTierModel").value = "x/y";
