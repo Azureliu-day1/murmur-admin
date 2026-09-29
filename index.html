@@ -418,7 +418,7 @@ table.mini tr.bad td{color:#b0392a}
               </div>
               <div id="cfgKeyMsg"></div>
               <p class="note">这里只显示末四位 / 长度 / 指纹前 8 位,库里的值加密存着、回包里永远没有它。<br>
-                <b>旧 key 请到上游控制台吊销</b> —— 这里换掉的只是 Murmur 用哪一把,旧的那把在上游仍然活着。<br>
+                <b>新 key 生效后请在上游吊销旧 key;在途请求可能失败一两次。</b>这里换掉的只是 Murmur 用哪一把,旧的那把在上游仍然活着。<br>
                 发信(Resend)与 Stripe webhook 两把本期不在这里换:另一个函数只读控制台里的那份,这里换了会把发信弄断。</p>
             </div>
           </div>
@@ -585,6 +585,7 @@ function apiFetch(url, opts) {
     var s = session();
     var used = s && s.access_token;
     var init = { method: opts.method || "GET", headers: authHeaders() };
+    if (opts.headers) Object.keys(opts.headers).forEach(function (k) { init.headers[k] = opts.headers[k]; });   // 如配置写的 x-admin-confirm
     if (opts.body != null) init.body = opts.body;
     return fetch(url, init).then(function (r) {
       if (r.status !== 401 || !mayRefresh) return r;
@@ -1906,7 +1907,8 @@ function cfgMsg(form, cls, html) { var el = $(form + "Msg"); if (el) el.innerHTM
 
 // 表单签名:试打时记下,生效时再算一遍,对不上就不许生效。⛔ 密钥表单的签名里没有值。
 function cfgSig(form) {
-  if (form === "cfgTier") return JSON.stringify([cfgTierCur, $("cfgTierProv").value, ($("cfgTierModel").value || "").trim()]);
+  if (form === "cfgTier") return JSON.stringify([cfgTierCur, $("cfgTierProv").value, ($("cfgTierModel").value || "").trim(),
+                                                 $("cfgTierIn").value || "", $("cfgTierOut").value || ""]);
   if (form === "cfgProv") return JSON.stringify(cfgProvCandidate());
   if (form === "cfgKey") return JSON.stringify([$("cfgKeyName").value, cfgKeyGen]);
   return "";
@@ -1934,13 +1936,38 @@ function cfgRunProbe(form, body) {
     .catch(function (e) { cfgMsg(form, "err", "试打没打出去:" + esc(e.message)); });
 }
 
-function cfgPost(path, body) {
-  return apiFetch(API + "/admin/config/" + path, { method: "POST", body: JSON.stringify(body) }).then(cfgJson);
+// 契约修正 1 §6:每次写之前先要一个一次性确认码(POST /admin/config/challenge,5 分钟、只能用一次),
+// 写请求带请求头 x-admin-confirm。不是独立防线,挡的是「会话被复用后的静默写」。⛔ 试打不带它(试打不写)。
+function cfgChallenge() {
+  return apiFetch(API + "/admin/config/challenge", { method: "POST", body: "{}" }).then(cfgJson).then(function (res) {
+    var n = res.ok && res.j && res.j.nonce;
+    if (!n) throw new Error("没拿到确认码:" + cfgErrText(res.j, res.status));
+    return String(n);
+  });
+}
+function cfgPost(path, bodyText) {
+  return cfgChallenge().then(function (nonce) {
+    return apiFetch(API + "/admin/config/" + path,
+                    { method: "POST", body: typeof bodyText === "string" ? bodyText : JSON.stringify(bodyText),
+                      headers: { "x-admin-confirm": nonce } }).then(cfgJson);
+  });
+}
+// 写失败的三种说法:服务端「先试后写」没过(probe_failed)/ 配置已被后来的改动更新(409 stale)/ 其它
+function cfgWriteErr(res) {
+  var j = res.j || {}, code = j.error && typeof j.error === "object" ? j.error.code : "";
+  if (res.status === 409 || code === "stale") return "配置已被后来的改动更新,刷新后再试。";
+  if (code === "probe_failed") {
+    var ps = (j.probes || []).filter(function (x) { return x && x.ok === false; }).map(function (x) {
+      return (x.provider_id || "") + (x.model_id ? " / " + x.model_id : "") + ":" + (x.error || "失败");
+    });
+    return "生效前服务端用这份新配置试打没过,什么都没改:" + cfgErrText(j, res.status) + (ps.length ? "(" + ps.join(";") + ")" : "");
+  }
+  return "没生效:" + cfgErrText(j, res.status);
 }
 // 写成功后:表单收起(整块会按新版本重画,表单里的消息会被冲掉),结果写进卡片上常驻的那一格
 function cfgAfterWrite(form, res, okText, doneForm) {
   if (!cfgClean(res.j)) { cfgMsg(form, "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("写入回包"); return false; }
-  if (!res.ok || (res.j && res.j.ok === false)) { cfgMsg(form, "err", "没生效:" + esc(cfgErrText(res.j, res.status))); return false; }
+  if (!res.ok || (res.j && res.j.ok === false)) { cfgMsg(form, "err", esc(cfgWriteErr(res))); return false; }
   if (form === "cfgTier") cfgTierCur = "";
   if (form === "cfgProv") cfgProvCur = null;
   cfgMsg(doneForm || form, "okmsg", okText);
@@ -1962,11 +1989,20 @@ function cfgTierEdit(t) {
     }).join("") + "</select></div>" +
     '<div><label>模型 id(照这家的写法)</label><input id="cfgTierModel" type="text" spellcheck="false" value="' + esc(cur.model_id || "") +
     '" oninput="cfgDirty(\'cfgTier\')"></div></div>' +
+    // 价键可选:不选 = 沿用当前那一对(换了家但价键还是旧家的,要自己留意)
+    '<div class="two">' + cfgPriceKeySelect("cfgTierIn", "输入价键", cur.in_price_key) + cfgPriceKeySelect("cfgTierOut", "输出价键", cur.out_price_key) + "</div>" +
     '<div class="row"><button class="btn quiet" onclick="cfgTierProbe()">试打</button>' +
     '<button class="btn" id="cfgTierApply" disabled onclick="cfgTierApply()">生效</button>' +
     '<button class="linkbtn" onclick="cfgTierCur=\'\';$(\'cfgTierForm\').innerHTML=\'\'">收起</button></div>' +
     '<div id="cfgTierMsg"></div></div>';
   cfgDirty("cfgTier");
+}
+function cfgPriceKeySelect(id, label, curKey) {
+  return '<div><label>' + label + '</label><select id="' + id + '" onchange="cfgDirty(\'cfgTier\')">' +
+    '<option value="">沿用当前价键' + (curKey ? "(" + esc(curKey) + ")" : "") + "</option>" +
+    cfgPricingItems().filter(function (x) { return /^llm_/.test(x.key); }).map(function (x) {
+      return '<option value="' + esc(x.key) + '">' + esc(x.key) + "(" + esc(x.value) + ")</option>";
+    }).join("") + "</select></div>";
 }
 function cfgTierProbe() {
   var model = ($("cfgTierModel").value || "").trim();
@@ -1976,17 +2012,23 @@ function cfgTierProbe() {
 function cfgTierApply() {
   if (!cfgIsOk("cfgTier")) { cfgDirty("cfgTier"); cfgMsg("cfgTier", "err", "先试打,回 OK 才能生效。"); return; }
   var body = { tier: cfgTierCur, provider_id: $("cfgTierProv").value, model_id: ($("cfgTierModel").value || "").trim() };
+  if ($("cfgTierIn").value) body.in_price_key = $("cfgTierIn").value;       // 不选就不带 = 服务端沿用当前价键
+  if ($("cfgTierOut").value) body.out_price_key = $("cfgTierOut").value;
+  var cur = ((CONFIG && CONFIG.models) || {})[cfgTierCur] || {};
   cfgDirty("cfgTier");
   return cfgPost("model", body).then(function (res) {
-    cfgAfterWrite("cfgTier", res, "生效了:「" + esc(body.tier) + "」档 → " + esc(body.provider_id) + " / " + esc(body.model_id) + "。客户端下一次请求就走它。", "cfgModels");
+    var keep = (!body.in_price_key || !body.out_price_key)
+      ? " 价键:" + esc((res.j && res.j.price_note) || ("沿用当前价键 " + (body.in_price_key || cur.in_price_key || "—") + " / " + (body.out_price_key || cur.out_price_key || "—"))) + "。"
+      : "";
+    cfgAfterWrite("cfgTier", res, "生效了:「" + esc(body.tier) + "」档 → " + esc(body.provider_id) + " / " + esc(body.model_id) + "。客户端下一次请求就走它。" + keep, "cfgModels");
   }).catch(function (e) { cfgMsg("cfgTier", "err", esc(e.message)); });
 }
 
 // ── 供应商 ──
-var CFG_DIALECTS = ["openai", "deepseek", "anthropic", "openrouter"];
+var CFG_DIALECTS = ["openai_compatible"];   // 契约修正 1 §5:本期只认有适配器的这一种
 function cfgProvEdit(id) {
   cfgProvCur = id;
-  var p = (id && cfgProvider(id)) || { id: "", kind: "llm", display_name: "", endpoint: "", dialect: "openai", key_name: "",
+  var p = (id && cfgProvider(id)) || { id: "", kind: "llm", display_name: "", endpoint: "", dialect: "openai_compatible", key_name: "",
                                         default_params: {}, strip_params: [], enabled: true };
   var keyNames = ((CONFIG && CONFIG.keys) || []).map(function (k) { return k.name; });
   function inp(fid, label, val, extra) {
@@ -2003,7 +2045,7 @@ function cfgProvEdit(id) {
     '<div><label>参数方言</label><select id="cfgProvDialect" onchange="cfgDirty(\'cfgProv\')">' +
       CFG_DIALECTS.map(function (k) { return '<option value="' + k + '"' + (p.dialect === k ? " selected" : "") + ">" + k + "</option>"; }).join("") + "</select></div>" +
     "</div>" +
-    inp("cfgProvEndpoint", "端点(chat completions 的完整 URL)", p.endpoint || "") +
+    inp("cfgProvEndpoint", "端点(chat completions 的完整 URL;host 只能是:" + esc(cfgHostAllow(p.id).join(" / ") || "—") + ")", p.endpoint || "") +
     '<div class="two">' +
     inp("cfgProvKey", "key 名" + (keyNames.length ? "(已有:" + esc(keyNames.join(" / ")) + ")" : ""), p.key_name || "") +
     inp("cfgProvStrip", "这家不认、要剥掉的参数(逗号分隔)", (p.strip_params || []).join(", ")) +
@@ -2039,24 +2081,30 @@ function cfgProvProbe() {
   if (c.default_params && c.default_params.__bad_json__) { cfgMsg("cfgProv", "err", "默认参数不是合法 JSON。"); return; }
   var model = ($("cfgProvModel").value || "").trim();
   if (c.kind === "llm" && !model) { cfgMsg("cfgProv", "err", "试打 llm 要填一个模型 id。"); return; }
-  // ⚠️ 服务端的试打打的是**库里已存的那一行**(端点 / 方言 / 参数从表里取,只有 key 名可以临时换)。
-  //    所以新加的一家、或改了端点 / 方言 / 参数的,试打试不到这份改动 —— 这时候不给「OK」,
-  //    否则「试打 OK」证明的是旧配置,生效的却是新配置。
-  var cur = cfgProvider(c.id);
-  var same = cur && cur.kind === c.kind && (cur.endpoint || "") === c.endpoint && (cur.dialect || null) === (c.dialect || null) &&
-             JSON.stringify(cur.strip_params || []) === JSON.stringify(c.strip_params) &&
-             JSON.stringify(cur.default_params || {}) === JSON.stringify(c.default_params);
-  if (!same) {
-    cfgDirty("cfgProv");
-    cfgMsg("cfgProv", "err", cur ? "改了端点 / 方言 / 参数:服务端的试打只打已保存的那一行,试不到这份改动,所以这里不能生效。"
-                                 : "新加的一家:服务端的试打只打已保存的供应商,新行没法先试打,所以这里不能生效。");
-    return;
-  }
-  return cfgRunProbe("cfgProv", { kind: c.kind, provider_id: c.id, key_name: c.key_name, model_id: model || undefined });
+  var bad = cfgHostProblem(c);
+  if (bad) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", esc(bad)); return; }
+  // 契约修正 1 §2:试打打的是**这份候选**(provider 字段),不是库里那一行
+  return cfgRunProbe("cfgProv", { kind: c.kind, provider_id: c.id, key_name: c.key_name, model_id: model || undefined, provider: c });
+}
+// 端点 host 白名单(契约修正 1 §1):清单从 GET /admin/config 读 —— 供应商行上的 host_allowlist,
+// 新加的一家用顶层 host_allowlist。前端只是先提示,真门在服务端(还要解析 IP、不跟随重定向)。
+function cfgHostAllow(id) {
+  var p = id && cfgProvider(id);
+  var list = (p && p.host_allowlist) || (CONFIG && CONFIG.host_allowlist) || [];
+  return Array.isArray(list) ? list : [];
+}
+function cfgHostProblem(c) {
+  var m = /^https:\/\/([^\/:?#]+)(:\d+)?(\/|$)/i.exec(c.endpoint || "");
+  if (!m) return "端点要是 https:// 开头的完整 URL。";
+  var host = m[1].toLowerCase(), allow = cfgHostAllow(c.id).map(function (h) { return String(h).toLowerCase(); });
+  if (allow.indexOf(host) < 0) return "端点的 host「" + host + "」不在允许清单里(" + (allow.join(" / ") || "清单为空") + ")。清单只能由迁移改。";
+  return "";
 }
 function cfgProvApply() {
   if (!cfgIsOk("cfgProv")) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", "先试打,回 OK 才能生效。"); return; }
   var c = cfgProvCandidate();
+  var bad = cfgHostProblem(c);
+  if (bad) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", esc(bad)); return; }
   cfgDirty("cfgProv");
   return cfgPost("provider", c).then(function (res) {
     cfgAfterWrite("cfgProv", res, "生效了:供应商 " + esc(c.id) + " 已保存。", "cfgModels");
@@ -2088,11 +2136,11 @@ function cfgKeyApply() {
   var body = JSON.stringify({ name: name, value: $("cfgKeyVal").value });
   $("cfgKeyVal").value = "";                  // ⛔ 先清框再发:不管成没成功,值都不再留在页面上
   cfgKeyDirty();
-  return apiFetch(API + "/admin/config/key", { method: "POST", body: body }).then(cfgJson).then(function (res) {
+  return cfgPost("key", body).then(function (res) {
     body = null;
     var k = (res.j && res.j.key) || {};
     cfgAfterWrite("cfgKey", res, "生效了:" + esc(name) + (k.last4 ? " 现在是 …" + esc(k.last4) : "") +
-      "。<b>旧 key 请到上游控制台吊销。</b>");
+      "。<b>新 key 生效后请在上游吊销旧 key;在途请求可能失败一两次。</b>");
   }).catch(function (e) { body = null; cfgMsg("cfgKey", "err", esc(e.message) + "(框已清空,重新粘贴再试打)"); });
 }
 
