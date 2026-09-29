@@ -186,9 +186,11 @@ function cfgFixture(extra) {
   return Object.assign({
     providers: [
       { id: "deepseek", kind: "llm", display_name: "DeepSeek", endpoint: "https://api.deepseek.com/chat/completions",
-        dialect: "deepseek", key_name: "DEEPSEEK_API_KEY", default_params: {}, strip_params: [], enabled: true, updated_at: T0 },
+        dialect: "openai_compatible", key_name: "DEEPSEEK_API_KEY", default_params: {}, strip_params: [], enabled: true, updated_at: T0,
+        host_allowlist: ["api.deepseek.com"] },
       { id: "openrouter", kind: "llm", display_name: "OpenRouter", endpoint: "https://openrouter.ai/api/v1/chat/completions",
-        dialect: "openai", key_name: "OPENROUTER_API_KEY", default_params: {}, strip_params: ["thinking", "reasoning_effort"], enabled: true, updated_at: T0 },
+        dialect: "openai_compatible", key_name: "OPENROUTER_API_KEY", default_params: {}, strip_params: ["thinking", "reasoning_effort"], enabled: true, updated_at: T0,
+        host_allowlist: ["openrouter.ai"] },
       { id: "soniox", kind: "asr", display_name: "Soniox", endpoint: "https://api.soniox.com/v1/auth/temporary-api-key",
         dialect: null, key_name: "SONIOX_API_KEY", default_params: {}, strip_params: [], enabled: true, updated_at: T0 },
     ],
@@ -201,6 +203,7 @@ function cfgFixture(extra) {
            { name: "RESEND_API_KEY", last4: "h5Jk", len: 36, sha8: "6b7c8d9e", updated_at: null, source: "env", used_by: ["mail"] },
            { name: "SONIOX_API_KEY", last4: "p7Rt", len: 64, sha8: "8c9d0e1f", updated_at: T0 }],
     versions: { config_version: 7 },
+    host_allowlist: ["api.deepseek.com", "openrouter.ai", "api.openai.com", "api.soniox.com"],
     audit: [
       // 形状照服务端 GET /admin/config 的 audit:数字 id、actor_email、created_at,没有 target 列(对象在快照里)
       { id: 11, created_at: T0, actor_email: "admin@example.com", action: "config.model", reason: null,
@@ -220,11 +223,17 @@ async function cfgWorld(routes, opt = {}) {
   const $ = id => { if (!els.has(id)) { const e = makeEl(id); e.disabled = undefined; e.checked = false; els.set(id, e); } return els.get(id); };
   const store = new Map([["murmur.admin.session", JSON.stringify(LIVE)]]);
   const reqs = [], out = [], confirms = [];
-  const st = { confirm: opt.confirm !== false };
+  const st = { confirm: opt.confirm !== false, nonces: 0, issued: [] };
   const res = (status, body) => ({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) });
   function fetchStub(url, init = {}) {
     const path = url.replace(API_PREFIX, "").split("?")[0];
-    reqs.push({ url, path, method: init.method || "GET", body: init.body == null ? null : String(init.body) });
+    const hdr = init.headers || {};
+    reqs.push({ url, path, method: init.method || "GET", body: init.body == null ? null : String(init.body), confirm: hdr["x-admin-confirm"] || null });
+    // 契约修正 1 §6:写之前先 POST /admin/config/challenge 拿一次性 nonce
+    if (path === "/admin/config/challenge" && !routes[path]) {
+      const n = "nonce-" + (++st.nonces); st.issued.push(n);
+      return Promise.resolve(res(200, { nonce: n, expires_in: 300 }));
+    }
     if (path === "/admin/stats") return Promise.resolve(res(200, { admin: "admin@example.com", server_time: T0, overview: {}, users: [],
       anomalies: [], plans: [], audit: [], invites: [], daily: [], features: [], feature_totals: [], apis: {} }));
     if (path === "/admin/access-requests") return Promise.resolve(res(200, { requests: [], counts: {} }));
@@ -255,7 +264,14 @@ async function cfgWorld(routes, opt = {}) {
     win[fn](...args); await drain();
   };
   return { win, $, els, store, reqs, out, confirms, st, drain, call,
-           posts: p => reqs.filter(r => r.path === p && r.method === "POST") };
+           posts: p => reqs.filter(r => r.path === p && r.method === "POST"),
+           // 每一发写都带着一个刚发出来、没用过的 nonce;试打不带
+           noncesOk: () => {
+             const writes = reqs.filter(r => r.method === "POST" && /^\/admin\/config\/(model|provider|pricing|key|rollback)$/.test(r.path));
+             const used = writes.map(r => r.confirm);
+             return writes.length > 0 && used.every(n => n && st.issued.includes(n)) && new Set(used).size === used.length &&
+                    reqs.filter(r => r.path === "/admin/config/probe").every(r => !r.confirm);
+           } };
 }
 
 // 在全局变量里深搜一个串(跳过函数与宿主对象,防环)
@@ -315,7 +331,9 @@ const CFG_CASES = [
     await w.call("cfgTierApply");
     const mp = w.posts("/admin/config/model");
     r.push([mp.length === 1 && mp[0].body === JSON.stringify({ tier: "smart", provider_id: "openrouter", model_id: "deepseek/deepseek-v4-flash-0731" }),
-            "重新试打 OK 后生效 → 恰好一发 POST model,带的是试打过的那一份"]);
+            "重新试打 OK 后生效 → 恰好一发 POST model,带的是试打过的那一份(价键没选 → 不带)"]);
+    r.push([w.noncesOk(), "写请求带 x-admin-confirm(先 challenge 拿的一次性 nonce),试打不带"]);
+    r.push([w.$("cfgModelsMsg").innerHTML.includes("沿用当前价键"), "价键没选 → 成功消息写「沿用当前价键」"]);
     return r;
   }],
   ["i) 换 key:提交后框空了,DOM / 全局变量 / localStorage / URL / console / 其它请求里都找不到它", async () => {
@@ -340,7 +358,9 @@ const CFG_CASES = [
     r.push([!w.reqs.some(q => q.url.includes(K)), "任何请求 URL 里都没有它"]);
     r.push([!w.reqs.some(q => q.body && q.body.includes(K) && !["/admin/config/probe", "/admin/config/key"].includes(q.path)), "只出现在 probe / key 两发请求体里"]);
     r.push([!w.out.some(l => l.includes(K)), "console / alert 里没有它"]);
-    r.push([w.$("cfgKeyMsg").innerHTML.includes("吊销"), "生效后提醒去上游吊销旧 key"]);
+    r.push([w.$("cfgKeyMsg").innerHTML.includes("吊销") && w.$("cfgKeyMsg").innerHTML.includes("在途请求"), "生效后提醒去上游吊销旧 key、在途请求可能失败"]);
+    r.push([w.noncesOk(), "换 key 那一发也带一次性 nonce"]);
+    r.push([!w.reqs.some(q => q.path === "/admin/config/challenge" && q.body && q.body.includes(K)), "challenge 请求里没有 key"]);
     await w.call("cfgKeyApply");
     r.push([w.posts("/admin/config/key").length === 1, "再点一次生效 → 不再发(要重新试打)"]);
     return r;
@@ -380,34 +400,46 @@ const CFG_CASES = [
     await w.call("cfgRollback", "11");
     const rb = w.posts("/admin/config/rollback");
     r.push([rb.length === 1 && JSON.parse(rb[0].body).audit_id === 11, "确认后恰好一发 rollback {audit_id:11}(数字,照服务端的 id)"]);
+    r.push([w.noncesOk(), "回退也带一次性 nonce"]);
+    // 契约修正 1 §3:回退 = 以那一版生成一次新变更;版本链对不上 → 409 stale
+    const w2 = await cfgWorld({ "/admin/config": () => [200, cfgFixture()],
+                                "/admin/config/rollback": () => [409, { error: { message: "stale", code: "stale" } }] });
+    await w2.call("cfgRollback", "11");
+    r.push([w2.$("cfgAuditMsg").innerHTML.includes("配置已被后来的改动更新,刷新后再试"), "409 stale → 「配置已被后来的改动更新,刷新后再试」"]);
     return r;
   }],
-  ["m) 供应商:服务端试打只打已存的那一行 —— 新加的 / 改了端点的不给 OK;没改的照常试打", async () => {
+  ["m) 供应商:试打带的是候选行;端点 host 不在允许清单 → 不发试打;方言只有 openai_compatible", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
                                "/admin/config/provider": () => [200, { ok: true }] });
     const r = [[!w.$("cfgProviders").innerHTML.includes("cfgProvEdit('soniox')") && w.$("cfgProviders").innerHTML.includes("cfgProvEdit('deepseek')"),
                 "识别底座(asr 行)没有「编辑」(服务端 400 asr_locked),llm 行有"]];
     const fill = (id, endpoint) => {
       w.$("cfgProvId").value = id; w.$("cfgProvKind").value = "llm"; w.$("cfgProvName").value = "X";
-      w.$("cfgProvEndpoint").value = endpoint; w.$("cfgProvDialect").value = "openai"; w.$("cfgProvKey").value = "OPENROUTER_API_KEY";
-      w.$("cfgProvStrip").value = "thinking, reasoning_effort"; w.$("cfgProvParams").value = "{}"; w.$("cfgProvModel").value = "x/y";
+      w.$("cfgProvEndpoint").value = endpoint; w.$("cfgProvDialect").value = "openai_compatible"; w.$("cfgProvKey").value = "OPENAI_API_KEY";
+      w.$("cfgProvStrip").value = "thinking, reasoning_effort"; w.$("cfgProvParams").value = "{}"; w.$("cfgProvModel").value = "gpt-x";
       w.$("cfgProvEnabled").value = "1";
     };
     await w.call("cfgProvEdit", "");
+    const form = w.$("cfgProvForm").innerHTML;
+    r.push([form.includes('value="openai_compatible"') && !/value="(anthropic|deepseek|openrouter|openai)"/.test(form), "方言下拉只有 openai_compatible"]);
     fill("newco", "https://api.example.com/v1/chat/completions");
     await w.call("cfgProvProbe");
-    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgProvApply").disabled === true, "新加的一家 → 不发试打、生效灰"]);
+    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgProvMsg").innerHTML.includes("不在允许清单"), "host 不在允许清单 → 不发试打、当场提示"]);
     await w.call("cfgProvApply");
     r.push([w.posts("/admin/config/provider").length === 0, "硬点生效 → 不发"]);
-    await w.call("cfgProvEdit", "openrouter");
-    fill("openrouter", "https://api.example.com/v1/chat/completions");
+    fill("newco", "http://api.openai.com/v1/chat/completions");
     await w.call("cfgProvProbe");
-    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgProvApply").disabled === true, "改了端点 → 不发试打、生效灰"]);
-    fill("openrouter", "https://openrouter.ai/api/v1/chat/completions");
+    r.push([w.posts("/admin/config/probe").length === 0, "不是 https → 不发试打"]);
+    fill("newco", "https://api.openai.com/v1/chat/completions");
     await w.call("cfgProvProbe");
-    r.push([w.posts("/admin/config/probe").length === 1 && w.$("cfgProvApply").disabled === false, "只改显示名 → 试打照常、OK 后亮"]);
+    const pb = w.posts("/admin/config/probe").map(x => JSON.parse(x.body));
+    r.push([pb.length === 1 && pb[0].provider && pb[0].provider.endpoint === "https://api.openai.com/v1/chat/completions" && pb[0].provider.id === "newco",
+            "新加一家(host 在清单里)→ 试打请求带着这份候选行"]);
+    r.push([w.$("cfgProvApply").disabled === false, "候选试打 OK → 生效亮"]);
     await w.call("cfgProvApply");
-    r.push([w.posts("/admin/config/provider").length === 1, "生效 → 一发 POST provider"]);
+    const pp = w.posts("/admin/config/provider");
+    r.push([pp.length === 1 && JSON.parse(pp[0].body).endpoint === "https://api.openai.com/v1/chat/completions" && w.noncesOk(),
+            "生效 → 一发 POST provider(带 nonce),写的就是试打过的那一份"]);
     return r;
   }],
   ["n) Resend / Stripe webhook 本期不可改:显示但禁用;没配的 key 显示「未配置」不当错误", async () => {
@@ -426,6 +458,37 @@ const CFG_CASES = [
     r.push([w.posts("/admin/config/probe").length === 0 && w.posts("/admin/config/key").length === 0, "硬选 RESEND 试打 / 生效 → 一发都不发"]);
     return r;
   }],
+  ["o) 生效时服务端先试后写没过(400 probe_failed)→ 显示归一化错误,不说成功", async () => {
+    const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
+      "/admin/config/model": () => [400, { probes: [{ provider_id: "openrouter", model_id: "x/y", ok: false, error: "HTTP 404 · model_not_found" }],
+                                           error: { message: "候选配置试打没通过 —— 没有保存", code: "probe_failed" } }] });
+    await w.call("cfgTierEdit", "smart");
+    w.$("cfgTierProv").value = "openrouter"; w.$("cfgTierModel").value = "x/y";
+    await w.call("cfgTierProbe");
+    await w.call("cfgTierApply");
+    const m = w.$("cfgTierMsg").innerHTML;
+    return [[w.posts("/admin/config/model").length === 1, "发了一次 POST model"],
+            [m.includes("试打没过") && m.includes("model_not_found") && m.includes("probe_failed"), "消息里有归一化错误(上游 code + probe_failed)"],
+            [!w.$("cfgModelsMsg").innerHTML.includes("生效了"), "没有说「生效了」"],
+            [w.$("cfgTierApply").disabled === true, "生效回到灰的(要重新试打)"]];
+  }],
+  ["p) 换模型时选了价键 → 请求带 in_price_key / out_price_key;价键也进签名", async () => {
+    const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
+                               "/admin/config/model": () => [200, { ok: true }] });
+    await w.call("cfgTierEdit", "smart");
+    const form = w.$("cfgTierForm").innerHTML;
+    w.$("cfgTierProv").value = "openrouter"; w.$("cfgTierModel").value = "x/y"; w.$("cfgTierIn").value = ""; w.$("cfgTierOut").value = "";
+    await w.call("cfgTierProbe");
+    w.$("cfgTierIn").value = "llm_flash_in_per_mtok"; w.$("cfgTierOut").value = "llm_flash_out_per_mtok";   // 试打后才改价键
+    await w.call("cfgTierApply");
+    const r = [[form.includes("沿用当前价键") && form.includes("llm_flash_in_per_mtok"), "表单里有价键下拉,默认「沿用当前价键」"],
+               [w.posts("/admin/config/model").length === 0, "试打后改了价键 → 签名对不上,不发"]];
+    await w.call("cfgTierProbe");
+    await w.call("cfgTierApply");
+    const mp = w.posts("/admin/config/model").map(x => JSON.parse(x.body));
+    r.push([mp.length === 1 && mp[0].in_price_key === "llm_flash_in_per_mtok" && mp[0].out_price_key === "llm_flash_out_per_mtok", "重新试打后生效 → 带上两个价键"]);
+    return r;
+  }],
   ["l) 单价:先确认「影响下一把 lease 的预扣」,取消就不发", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/pricing": () => [200, { ok: true }] });
     const r = [[w.$("cfgPricing").innerHTML.includes("asr_rt_micros_per_second"), "单价表列出了各项"]];
@@ -438,6 +501,7 @@ const CFG_CASES = [
     await w.call("cfgPriceApply", 0);
     const pp = w.posts("/admin/config/pricing");
     r.push([pp.length === 1 && pp[0].body === JSON.stringify({ key: "asr_rt_micros_per_second", value: 60 }), "确认 → 一发 POST pricing {key, value:60}"]);
+    r.push([w.noncesOk(), "单价那一发也带一次性 nonce"]);
     return r;
   }],
 ];
