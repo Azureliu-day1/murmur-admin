@@ -384,7 +384,8 @@ const CFG_CASES = [
   ["m) 供应商:服务端试打只打已存的那一行 —— 新加的 / 改了端点的不给 OK;没改的照常试打", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
                                "/admin/config/provider": () => [200, { ok: true }] });
-    const r = [];
+    const r = [[!w.$("cfgProviders").innerHTML.includes("cfgProvEdit('soniox')") && w.$("cfgProviders").innerHTML.includes("cfgProvEdit('deepseek')"),
+                "识别底座(asr 行)没有「编辑」(服务端 400 asr_locked),llm 行有"]];
     const fill = (id, endpoint) => {
       w.$("cfgProvId").value = id; w.$("cfgProvKind").value = "llm"; w.$("cfgProvName").value = "X";
       w.$("cfgProvEndpoint").value = endpoint; w.$("cfgProvDialect").value = "openai"; w.$("cfgProvKey").value = "OPENROUTER_API_KEY";
