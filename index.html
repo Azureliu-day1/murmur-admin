@@ -2297,11 +2297,15 @@ function cfgRollback(id) {
 
 // ════════════════════════════════════════════════════════════════════
 // 远程配置(2026-09-30,契约 docs/CONTRACT-remote-config.md v0.2)
-//   GET  /admin/config                    → 多一格 remote:{schema_version, revision, published_at, published_by, note,
-//                                            snapshot{flags,defaults,styles,copy}, builtin{同形}, clients?, changed?, history[]}
-//   POST /admin/config/remote             {base_revision, note, snapshot}   写:先 challenge 拿 nonce,带 x-admin-confirm
+//   GET  /admin/config                    → 多一格 remote:{schema_version, revision, published_at, published_by, note, mail_status,
+//                                            current{flags,defaults,styles,copy,…下发外壳}, builtin{flags,defaults,styles{场景:{text,knobs}},copy}
+//                                            (builtin 里 null = 客户端内置、服务端没登记), clients, history[], limits, preview_samples}
+//                                            读挂了 → remote = {error}
+//   POST /admin/config/remote             {expect_revision, note, config}   写:先 challenge 拿 nonce,带 x-admin-confirm
+//                                            → {ok, revision, previous, warnings[{path,word}], mail} / 400 {invalid{path,rule}, error{code:"invalid_config"}}
 //   POST /admin/config/remote/preview     {styles}                          不写配置、不带 nonce(费用记 admin.probe)
-//   POST /admin/config/remote/rollback    {base_revision, to_revision}      写:同样带 nonce;当前 revision 不对 → 409 stale
+//                                            → {ok(任一条失败即 false), samples[{scene,input,ok,output|error,latency_ms}], cost_micro_usd, warnings}
+//   POST /admin/config/remote/rollback    {expect_revision, to_revision}    写:同样带 nonce;当前 revision 不对 → 409 stale
 // 四条规矩写在代码里(哨兵 tools/session-harness.mjs r–v):
 //   ① extra 违规(> 200 字 / 换行 / 控制字符 / 花括号 / 反引号)发布与预览都**不发请求**;角色词只黄色提醒、不拦。
 //   ② 发布 = 先拿一次性 nonce 再 POST;服务端 400 把原文(message / code / details)原样摆出来,不改写成人话。
@@ -2333,7 +2337,8 @@ var RC_EXTRA_MAX = 200;
 var rcPreviewSig = null;          // 预览时那一份候选 styles 的签名(只有签名,没有结果)
 
 function rcRemote() { return (CONFIG && CONFIG.remote) || null; }
-function rcSnap() { var r = rcRemote() || {}; return r.snapshot || r.config || r; }
+function rcLive() { var r = rcRemote(); return r && !r.error ? r : null; }
+function rcSnap() { var r = rcRemote() || {}; return r.current || r.snapshot || r.config || r; }
 function rcBuiltin() { var r = rcRemote() || {}; return r.builtin || r.defaults_builtin || {}; }
 function rcPart(o, part) { return (o && o[part] && typeof o[part] === "object") ? o[part] : {}; }
 function rcRev() { var r = rcRemote(); return r && r.revision != null ? Number(r.revision) : null; }
@@ -2355,6 +2360,7 @@ function rcStable(v) {
 }
 function rcShow(v) {
   if (v === undefined) return '<span class="muted">—</span>';
+  if (v === null) return '<span class="muted" title="服务端没登记这一项的内置值,以客户端为准">客户端内置</span>';
   if (v === true) return "开";
   if (v === false) return "关";
   return esc(typeof v === "object" ? JSON.stringify(v) : v);
@@ -2370,18 +2376,19 @@ function rcChanged(path) {
 
 function renderRemote() {
   var r = rcRemote();
-  if (!r) {
+  if (!r || r.error) {
     $("rcBody").classList.add("hidden");
     $("rcVer").textContent = "";
-    $("rcNone").innerHTML = '<p class="muted">服务端还没有远程配置(GET /admin/config 里没有 remote 这一格)。</p>';
+    $("rcNone").innerHTML = !r ? '<p class="muted">服务端还没有远程配置(GET /admin/config 里没有 remote 这一格)。</p>'
+                               : '<p class="err">远程配置没读出来:' + esc(r.error) + "(模型 / 密钥 / 单价照常)</p>";
     $("rcNone").classList.remove("hidden");
     return;
   }
   $("rcNone").classList.add("hidden");
   $("rcBody").classList.remove("hidden");
   $("rcVer").textContent = "revision " + (r.revision == null ? "—" : r.revision) + " · schema " + (r.schema_version == null ? "—" : r.schema_version);
-  $("rcSchema").innerHTML = "schema_version " + esc(r.schema_version == null ? "—" : r.schema_version) + ":" +
-    esc(r.clients || r.schema_note || "0.53 及以上的 Mac 客户端会吃到这份配置;更旧的版本拿不到、也不受影响;iOS 不接。") +
+  $("rcSchema").innerHTML = esc(r.clients || ("schema_version " + (r.schema_version == null ? "—" : r.schema_version) +
+    ":0.53 及以上的 Mac 客户端会吃到这份配置;更旧的版本拿不到、也不受影响;iOS 不接。")) +
     " 生效口径:客户端下一次刷新(约 " + esc((r.refresh_s || rcSnap().refresh_s || 300) / 60) + " 分钟内)/ 下一次听写,不承诺更快。";
   renderRcHistory();
   renderRcFlags();
@@ -2415,7 +2422,8 @@ function renderRcHistory() {
         : '<span class="cfg-when">' + (Number(x.revision) === cur ? "没有更早的版本" : "—") + "</span>";
       return '<tr><td class="mono">r' + esc(x.revision) + (Number(x.revision) === cur ? ' <span class="chip ok">当前</span>' : "") + "</td>" +
         "<td>" + esc(when(x.published_at || x.created_at)) + '</td><td class="mob-hide">' + esc(x.published_by || x.actor_email || "—") + "</td>" +
-        "<td>" + esc(x.note || (x.rollback_of != null ? "回退 r" + x.rollback_of : "")) + "</td><td>" + act + "</td></tr>";
+        "<td>" + esc(x.note || (x.rollback_of != null ? "回退到 r" + x.rollback_of : "")) +
+        (x.mail_status === "failed" ? ' <span class="chip risk" title="改动告警信没发出去">告警信没发出</span>' : "") + "</td><td>" + act + "</td></tr>";
     }).join("") + "</tbody>";
 }
 
@@ -2457,6 +2465,21 @@ function rcStyleText(st) {
   });
   return esc(parts.join(" · ")) + (st.extra ? '<div class="cfg-diff">extra:「' + esc(st.extra) + "」</div>" : "");
 }
+// 内置那一格:服务端给的是 {text: 生产真正用的那段原文, knobs: 编辑器起始值};老形状(直接是旋钮)也认
+function rcBuiltinStyle(bs, sc) {
+  var b = bs[sc];
+  if (!b || typeof b !== "object") return { text: undefined, knobs: null };
+  if (b.knobs || "text" in b) return { text: b.text, knobs: b.knobs || null };
+  return { text: undefined, knobs: b };
+}
+function rcBuiltinText(b) {
+  if (b.text === null) return '<span class="muted">没有场景风格段(只用通用整理规则)</span>';
+  if (typeof b.text === "string") {
+    var t = b.text.length > 140 ? b.text.slice(0, 140) + "…" : b.text;
+    return '<span title="' + esc(b.text) + '">「' + esc(t) + "」</span>";
+  }
+  return rcStyleText(b.knobs);
+}
 function renderRcStyles() {
   var cs = rcPart(rcSnap(), "styles"), bs = rcPart(rcBuiltin(), "styles");
   $("rcStyles").innerHTML = rcSceneList().map(function (s) {
@@ -2465,7 +2488,7 @@ function renderRcStyles() {
       '<div class="rc-head"><b>' + esc(s[1]) + '</b><span class="muted mono">' + esc(s[0]) + "</span>" +
       '<label class="rc-check"><input type="checkbox" id="' + id + '_on" onchange="rcSceneToggle(\'' + esc(s[0]) + '\')"> 远程覆盖这个场景</label>' +
       '<span style="margin-left:auto">' + rcChanged("styles." + s[0]) + "</span></div>" +
-      '<div class="cfg-when">内置:' + rcStyleText(bs[s[0]]) + "</div>" +
+      '<div class="cfg-when">内置:' + rcBuiltinText(rcBuiltinStyle(bs, s[0])) + "</div>" +
       '<div class="cfg-when">当前远程:' + rcStyleText(cs[s[0]]) + "</div>" +
       '<div class="rc-knobs">' + RC_KNOBS.map(function (k) {
         return '<div><label>' + esc(k[1]) + '</label><select id="' + id + "_" + k[0] + '" onchange="rcStylesDirty()">' +
@@ -2476,7 +2499,7 @@ function renderRcStyles() {
       '<div id="' + id + '_msg"></div></div></div>';
   }).join("");
   rcSceneList().forEach(function (s) {
-    var st = cs[s[0]] || bs[s[0]] || {};
+    var st = cs[s[0]] || rcBuiltinStyle(bs, s[0]).knobs || {};
     $("rcSt_" + s[0] + "_on").checked = !!cs[s[0]];
     RC_KNOBS.forEach(function (k) {
       var v = st[k[0]];
@@ -2524,7 +2547,7 @@ function rcExtraBlock() {
 
 function renderRcCopy() {
   var cc = rcPart(rcSnap(), "copy"), bc = rcPart(rcBuiltin(), "copy");
-  function txt(o, lang) { return o && typeof o === "object" ? o[lang] : (lang === "zh" ? o : undefined); }
+  function txt(o, lang) { return o && typeof o === "object" ? o[lang] : o === null ? null : (lang === "zh" ? o : undefined); }
   $("rcCopy").innerHTML = "<thead><tr><th>文案</th><th>内置默认</th><th>当前远程</th><th>新值</th><th class=\"mob-hide\">最后改动</th></tr></thead><tbody>" +
     RC_COPY.map(function (c) {
       var b = bc[c[0]], v = cc[c[0]];
@@ -2594,20 +2617,20 @@ function rcStylesDirty() {
 function rcServerErr(res) {
   var j = res.j || {}, code = j.error && typeof j.error === "object" ? j.error.code : (j.code || "");
   if (res.status === 409 || code === "stale") return "配置已被后来的改动更新,刷新后再试。";
-  var det = (j.error && typeof j.error === "object" && (j.error.details || j.error.errors)) || j.details || j.errors;
+  var det = (j.error && typeof j.error === "object" && (j.error.details || j.error.errors)) || j.invalid || j.details || j.errors;
   var d = ""; if (det != null) { try { d = typeof det === "string" ? det : JSON.stringify(det); } catch (e) { d = String(det); } }
   return "服务端拒绝了(HTTP " + res.status + "):" + cfgErrText(j, res.status) + (d ? "\n" + d : "");
 }
 
 function rcPublish() {
-  if (!rcRemote()) return;
+  if (!rcLive()) return;
   var bad = rcExtraBlock();
   if (bad) { cfgMsg("rcPub", "err", "没发:" + esc(bad)); return; }
   var cand = rcCandidate(), diff = rcDiff(rcSnap(), cand), cur = rcRev();
   if (!diff.length) { cfgMsg("rcPub", "note", "和当前 revision " + esc(cur) + " 一样,没什么可发布的。"); return; }
   if (!confirm("发布 revision " + (cur == null ? "?" : cur + 1) + "?\n\n改了 " + diff.length + " 项:\n  " + diff.join("\n  ") +
                "\n\n0.53 及以上的客户端下一次刷新 / 下一次听写吃到;非法值服务端会整次拒绝。")) return;
-  var body = { base_revision: cur, note: ($("rcNote").value || "").trim(), snapshot: cand };
+  var body = { expect_revision: cur, note: ($("rcNote").value || "").trim(), config: cand };
   cfgMsg("rcPub", "note", "发布中…");
   return cfgPost("remote", body).then(function (res) {
     if (!cfgClean(res.j)) { cfgMsg("rcPub", "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("远程配置发布回包"); return; }
@@ -2616,7 +2639,10 @@ function rcPublish() {
       return;
     }
     var nr = res.j && (res.j.revision != null ? res.j.revision : res.j.remote && res.j.remote.revision);
-    cfgMsg("rcPub", "okmsg", "发布了" + (nr != null ? " revision " + esc(nr) : "") + "(" + diff.length + " 项)。客户端下一次刷新吃到。");
+    cfgMsg("rcPub", "okmsg", "发布了" + (nr != null ? " revision " + esc(nr) : "") + "(" + diff.length + " 项)。客户端下一次刷新吃到;改动告警信已登记。");
+    var ws = (res.j && res.j.warnings) || [];
+    if (ws.length) $("rcPubMsg").innerHTML += '<p class="warnmsg">服务端告警(没拦):' +
+      esc(ws.map(function (w) { return (w.path || "") + "「" + (w.word || "") + "」"; }).join("、")) + "</p>";
     load();
   }).catch(function (e) { cfgMsg("rcPub", "err", esc(e.message)); });
 }
@@ -2625,7 +2651,7 @@ function rcRollback() {
   var cur = rcRev(), prev = rcPrevRevision();
   if (cur == null || prev == null) { cfgMsg("rcHist", "err", "没有更早的版本可回。"); return; }
   if (!confirm("回退 revision " + cur + "?\n\n会用 r" + prev + " 的快照生成一个新的 revision " + (cur + 1) + "(历史不改写)。")) return;
-  return cfgPost("remote/rollback", { base_revision: cur, to_revision: prev }).then(function (res) {
+  return cfgPost("remote/rollback", { expect_revision: cur, to_revision: prev }).then(function (res) {
     if (!cfgClean(res.j)) { cfgMsg("rcHist", "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("远程配置回退回包"); return; }
     if (!res.ok || (res.j && res.j.ok === false)) { $("rcHistMsg").innerHTML = '<p class="err" style="white-space:pre-wrap">' + esc(rcServerErr(res)) + "</p>"; return; }
     cfgMsg("rcHist", "okmsg", "回退了:现在是 r" + prev + " 的内容" + (res.j && res.j.revision != null ? "(新 revision " + esc(res.j.revision) + ")" : "") + "。");
@@ -2636,7 +2662,7 @@ function rcRollback() {
 // 预览:候选 styles × 5 条固定样例,服务端跑与生产一致的组装路径。
 // ⛔ 结果只画进 #rcPreview:不存全局变量、不进 localStorage(换一页 / 刷新就没了,本来就只是给人眼看一次)。
 function rcPreview() {
-  if (!rcRemote()) return;
+  if (!rcLive()) return;
   var bad = rcExtraBlock();
   if (bad) { cfgMsg("rcPreview", "err", "没发:" + esc(bad)); return; }
   var styles = rcCandidateStyles(), sig = rcStable(styles);
@@ -2647,21 +2673,26 @@ function rcPreview() {
     .then(cfgJson)
     .then(function (res) {
       $("rcPreviewBtn").disabled = false;
-      if (!res.ok || (res.j && res.j.ok === false)) {
+      // 服务端只要有一条样例失败就回 ok:false,但其余几条照样有结果 → HTTP 200 就照画,逐条标错
+      if (!res.ok) {
         $("rcPreviewMsg").innerHTML = '<p class="err" style="white-space:pre-wrap">预览没跑成:' + esc(rcServerErr(res)) + "</p>";
         return;
       }
-      var rows = (res.j && (res.j.results || res.j.samples)) || [];
+      var rows = (res.j && (res.j.samples || res.j.results)) || [];
       rcPreviewSig = sig;
       $("rcPreviewMsg").innerHTML = "";
       // 免责标签和结果放在同一格:结果在,标签就在(预览后又改了候选,上面那格换成「结果是旧的」,这里不动)
       $("rcPreview").innerHTML = '<p class="note"><span class="rc-preview-tag">只供人眼看,不是质量证明</span> ' +
-        "用的是上面这份<b>候选</b>(还没发布)。" + (res.j && res.j.cost_micro_usd != null ? " 这次花了 " + esc(usd(res.j.cost_micro_usd)) + "。" : "") + "</p>" +
+        "用的是上面这份<b>候选</b>(还没发布)。" + (res.j && res.j.cost_micro_usd != null ? " 这次花了 " + esc(usd(res.j.cost_micro_usd)) + "。" : "") +
+        (res.j && res.j.spent_today_micro_usd != null && res.j.budget_micro_usd != null
+          ? " 今天预览已花 " + esc(usd(res.j.spent_today_micro_usd)) + " / " + esc(usd(res.j.budget_micro_usd)) + "。" : "") + "</p>" +
         (!rows.length ? '<p class="muted">服务端没回样例结果。</p>' : '<div class="tablebox"><table class="mini"><thead><tr><th>场景</th><th>样例(原话)</th><th>候选整理结果</th></tr></thead><tbody>' +
         rows.map(function (x) {
-          return '<tr' + (x.error ? ' class="bad"' : "") + '><td class="mono">' + esc(x.scene || "—") + "</td>" +
+          var bad = x.ok === false || !!x.error;
+          return '<tr' + (bad ? ' class="bad"' : "") + '><td class="mono">' + esc(x.scene || "—") +
+            (x.style_source ? '<div class="cfg-when">' + (x.style_source === "candidate" ? "候选风格" : "内置风格") + "</div>" : "") + "</td>" +
             '<td class="cfg-diff">' + esc(x.input || x.sample || "") + "</td>" +
-            '<td class="cfg-diff">' + (x.error ? "出错:" + esc(x.error) : esc(x.output || "")) +
+            '<td class="cfg-diff">' + (bad ? "出错:" + esc(x.error || "失败") : esc(x.output || "")) +
             (x.latency_ms != null ? ' <span class="cfg-when">' + esc(x.latency_ms) + " ms</span>" : "") + "</td></tr>";
         }).join("") + "</tbody></table></div>");
     })
