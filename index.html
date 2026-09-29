@@ -1809,7 +1809,9 @@ function renderCfgProviders() {
         '<td class="mono">' + esc(p.key_name || "—") + "</td>" +
         "<td>" + (p.enabled ? '<span class="chip ok">启用</span>' : '<span class="chip">停用</span>') + "</td>" +
         '<td class="mob-hide">' + cfgWhen(p.updated_at) + "</td>" +
-        '<td><button class="btn quiet" onclick="cfgProvEdit(\'' + esc(p.id) + '\')">编辑</button></td></tr>';
+        // 识别底座(asr 行)服务端锁着(400 asr_locked):模型与协议在客户端,换它要发版
+        (p.kind === "asr" ? '<td><span class="cfg-when" title="识别底座的模型与协议在客户端,换它要发版">发版才能改</span></td></tr>'
+                          : '<td><button class="btn quiet" onclick="cfgProvEdit(\'' + esc(p.id) + '\')">编辑</button></td></tr>');
     }).join("") + "</tbody>";
 }
 
@@ -1821,7 +1823,7 @@ function renderCfgKeys() {
       return '<tr><td class="mono">' + esc(k.name) + "</td>" +
         '<td class="mono">' + (k.last4 ? "…" + esc(k.last4) : '<span class="muted">没配</span>') + "</td>" +
         '<td class="num mob-hide">' + esc(k.len == null ? "—" : k.len) + "</td>" +
-        '<td class="mono">' + esc(k.sha8 || "—") + "</td>" +
+        '<td class="mono">' + esc(k.sha8 || "—") + (k.source ? ' <span class="cfg-when">' + esc(k.source) + "</span>" : "") + "</td>" +
         '<td class="mob-hide">' + cfgWhen(k.updated_at) + "</td></tr>";
     }).join("") + "</tbody>";
   var sel = $("cfgKeyName"), keep = sel.value;
@@ -2058,7 +2060,8 @@ function cfgKeyTarget(name) {
 function cfgKeyProbe() {
   var name = $("cfgKeyName").value;
   var p = cfgKeyTarget(name);
-  if (!p) { cfgMsg("cfgKey", "err", "没有哪家供应商用 " + esc(name) + " —— 没法试打,也就不能在这里换。"); return; }
+  if (!p) { cfgMsg("cfgKey", "err", "没有哪家供应商用 " + esc(name) + " —— 没法试打,也就不能在这里换" +
+                   "(发信的 key 另有一个函数只读 Edge secret,在这里换了它也用不上)。"); return; }
   if (!$("cfgKeyVal").value) { cfgMsg("cfgKey", "err", "新 key 没填。"); return; }
   var model = p.kind === "llm" ? (((CONFIG.models || {}).fast || {}).provider_id === p.id ? CONFIG.models.fast.model_id
                                  : ((CONFIG.models || {}).smart || {}).provider_id === p.id ? CONFIG.models.smart.model_id : undefined) : undefined;
