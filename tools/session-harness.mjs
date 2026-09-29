@@ -596,19 +596,18 @@ const CFG_CASES = [
   }],
   ["s) 远程配置 · 发布 = 先拿 nonce 再 POST;确认取消不发;没改动不发;服务端 400 原文(message / code / details)原样显示", async () => {
     // 形状照服务端 remoteRpcFail:{invalid:{path,rule}, error:{message, code:"invalid_config", rid, reason}}
-    let reply = [400, { invalid: { path: "defaults.hud_done_seconds", rule: "range" },
-                        error: { message: "配置不合规矩(defaults.hud_done_seconds · range),整次没发布", from: "murmur", rid: "r-1", code: "invalid_config",
-                                 reason: "defaults.hud_done_seconds:range" } }];
+    // 数值越界自 2026-09-29 裁决起页面直接拦(见 w),所以这里拿页面不管的规则(额度文案带占位符)走服务端 400
+    let reply = [400, { invalid: { path: "copy.quota_exhausted_free.zh", rule: "placeholder" },
+                        error: { message: "配置不合规矩(copy.quota_exhausted_free.zh · placeholder),整次没发布", from: "murmur", rid: "r-1", code: "invalid_config",
+                                 reason: "copy.quota_exhausted_free.zh:placeholder" } }];
     const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()], "/admin/config/remote": () => reply });
     const r = [];
     await w.call("rcPublish");
     r.push([w.posts("/admin/config/remote").length === 0 && w.$("rcPubMsg").innerHTML.includes("没什么可发布"), "什么都没改 → 不发,说没什么可发布"]);
-    w.$("rcD_hud_done_seconds").value = "9";
-    await w.call("rcNumCheck", "hud_done_seconds");
-    r.push([w.$("rcD_hud_done_seconds_msg").innerHTML.includes("warnmsg"), "9 超出 0.8–4.0 → 黄色提醒(不拦,门在服务端)"]);
+    w.$("rcC_quota_exhausted_free_zh").value = "额度用完了 {version}"; w.$("rcC_quota_exhausted_free_en").value = "Quota used up {version}";
     w.st.confirm = false;
     await w.call("rcPublish");
-    r.push([w.confirms.some(c => c.includes("defaults.hud_done_seconds") && c.includes("revision 5")), "确认框列出改了哪一项、发布后是 revision 5"]);
+    r.push([w.confirms.some(c => c.includes("copy.quota_exhausted_free") && c.includes("revision 5")), "确认框列出改了哪一项、发布后是 revision 5"]);
     r.push([w.reqs.filter(q => q.path === "/admin/config/challenge" || q.path === "/admin/config/remote").length === 0, "取消 → challenge 与发布都没发"]);
     w.st.confirm = true;
     await w.call("rcPublish");
@@ -617,11 +616,12 @@ const CFG_CASES = [
     const body = pb[0] && JSON.parse(pb[0].body);
     r.push([rq.join(",") === "/admin/config/challenge,/admin/config/remote", "顺序:先 challenge,再 POST remote"]);
     r.push([w.noncesOk(), "POST remote 带 x-admin-confirm = 刚发的一次性 nonce"]);
-    r.push([body && body.expect_revision === 4 && body.config.defaults.hud_done_seconds === 9 && body.config.styles.chat &&
+    r.push([body && body.expect_revision === 4 && body.config.copy.quota_exhausted_free.zh === "额度用完了 {version}" &&
+            body.config.defaults.hud_done_seconds === 2.5 && body.config.styles.chat &&
             body.config.copy.update_available.zh === "有新版了,去看看" && !("revision" in body.config) && !("refresh_s" in body.config),
             "请求体 = {expect_revision:4, config: 完整候选快照(没改的键照带,不夹下发外壳字段)}"]);
     const em = w.$("rcPubMsg").innerHTML;
-    r.push([em.includes("配置不合规矩(defaults.hud_done_seconds · range)") && em.includes("invalid_config") && em.includes("&quot;rule&quot;:&quot;range&quot;") && em.includes("整次没发布"),
+    r.push([em.includes("配置不合规矩(copy.quota_exhausted_free.zh · placeholder)") && em.includes("invalid_config") && em.includes("&quot;rule&quot;:&quot;placeholder&quot;") && em.includes("整次没发布"),
             "400 → 服务端原文 message + code + details 原样摆出来,并写明整次没发布"]);
     reply = [200, { ok: true, action: "config.remote.publish", revision: 5, previous: 4, warnings: [{ path: "styles.email.extra", word: "system" }], mail: "pending" }];
     const gets0 = w.reqs.filter(q => q.path === "/admin/config" && q.method === "GET").length;
@@ -723,6 +723,40 @@ const CFG_CASES = [
     await w3.call("rcPublish");
     r.push([hidden(w3, "rcBody") && w3.$("rcNone").innerHTML.includes("remote_read_failed") && w3.posts("/admin/config/remote").length === 0,
             "服务端读挂了(remote.error)→ 显示原因、三卡不画、发布不发"]);
+    return r;
+  }],
+  ["w) 远程配置 · 数值越界页面直接拦:红字写范围、发布按钮禁用、硬点也不发;范围优先读服务端元数据,没有就用契约表", async () => {
+    const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()], "/admin/config/remote": () => [200, { ok: true, revision: 5 }] });
+    const r = [[w.$("rcPubBtn").disabled === false, "当前值都在范围内 → 发布按钮可点"],
+               [w.$("rcFlags").innerHTML.includes("0.8–4") && w.$("rcFlags").innerHTML.includes("10–180") && w.$("rcFlags").innerHTML.includes("0.5–0.95"),
+                "没有服务端元数据 → 按契约表写范围(0.8–4 / 10–180 / 0.5–0.95)"]];
+    const sent = () => w.reqs.filter(q => q.path === "/admin/config/challenge" || q.path === "/admin/config/remote").length;
+    for (const [k, v, rg] of [["hud_done_seconds", "9", "0.8–4"], ["hud_done_seconds", "0.79", "0.8–4"], ["parked_ttl_seconds", "181", "10–180"], ["quota_warn_ratio", "0.96", "0.5–0.95"]]) {
+      w.$("rcD_" + k).value = v;
+      await w.call("rcNumCheck", k);
+      const m = w.$("rcD_" + k + "_msg").innerHTML;
+      r.push([m.includes('class="err"') && m.includes(rg) && w.$("rcPubBtn").disabled === true, k + " = " + v + " → 红字写「" + rg + "」、发布按钮禁用"]);
+      await w.call("rcPublish");
+      r.push([sent() === 0 && w.$("rcPubMsg").innerHTML.includes("defaults." + k), "硬调发布 → challenge 与发布都没发,说了哪一项"]);
+      w.$("rcD_" + k).value = ""; await w.call("rcNumCheck", k);
+    }
+    w.$("rcD_hud_done_seconds").value = "4.0";
+    await w.call("rcNumCheck", "hud_done_seconds");
+    r.push([w.$("rcPubBtn").disabled === false && w.$("rcD_hud_done_seconds_msg").innerHTML === "", "边界 4.0 → 放行、按钮可点、没红字"]);
+    await w.call("rcPublish");
+    r.push([w.posts("/admin/config/remote").length === 1 && JSON.parse(w.posts("/admin/config/remote")[0].body).config.defaults.hud_done_seconds === 4,
+            "边界值照发(发的是数字 4)"]);
+    // 服务端元数据给了范围 → 用它({min,max} 与 [min,max] 两种形状)
+    const fx = rcFixture();
+    fx.remote.limits.defaults = { hud_done_seconds: { min: 1, max: 3 } };
+    fx.remote.ranges = { defaults: { parked_ttl_seconds: [20, 90] } };
+    const w2 = await cfgWorld({ "/admin/config": () => [200, fx] });
+    r.push([w2.$("rcFlags").innerHTML.includes("1–3") && w2.$("rcFlags").innerHTML.includes("20–90"), "有服务端元数据 → 范围列写服务端给的(1–3 / 20–90)"]);
+    w2.$("rcD_hud_done_seconds").value = "3.5"; await w2.call("rcNumCheck", "hud_done_seconds");
+    r.push([w2.$("rcD_hud_done_seconds_msg").innerHTML.includes("1–3") && w2.$("rcPubBtn").disabled === true, "3.5 在契约表内但超出服务端的 1–3 → 拦"]);
+    w2.$("rcD_hud_done_seconds").value = ""; await w2.call("rcNumCheck", "hud_done_seconds");
+    w2.$("rcD_parked_ttl_seconds").value = "100"; await w2.call("rcNumCheck", "parked_ttl_seconds");
+    r.push([w2.$("rcPubBtn").disabled === true && w2.$("rcD_parked_ttl_seconds_msg").innerHTML.includes("20–90"), "数组形状 [20, 90] 也认:100 → 拦"]);
     return r;
   }],
   ["l) 单价:先确认「影响下一把 lease 的预扣」,取消就不发", async () => {

@@ -468,7 +468,7 @@ table.mini tr.bad td{color:#b0392a}
               <div class="eyebrow">flags &amp; defaults · <b>开关与默认值</b></div>
               <div class="tablebox"><table id="rcFlags"></table></div>
               <p class="note">「默认开」只影响<b>从没自己选过</b>的用户,不盖过用户的选择;「紧急关」盖过用户选择,界面显示「暂时关闭」。
-                「公开」= 匿名的 /config/public 也会下发。数值越界客户端回内置;空着 = 不下发、用内置。</p>
+                「公开」= 匿名的 /config/public 也会下发。数值要在范围内(越界这里直接拦、发布按钮变灰);空着 = 不下发、用内置。</p>
             </div>
             <div class="card" style="margin-top:12px">
               <div class="eyebrow">scene styles · <b>场景风格</b></div>
@@ -2438,7 +2438,8 @@ function renderRcFlags() {
       '<td><select id="rcF_' + f[0] + '"><option value="">不设(用内置)</option><option value="1">开</option><option value="0">关</option></select></td>' +
       '<td class="mob-hide">' + rcChanged("flags." + f[0]) + "</td></tr>";
   }).concat(RC_DEFAULTS.map(function (d) {
-    return '<tr><td>' + esc(d[1]) + '<div class="cfg-when mono">defaults.' + esc(d[0]) + " · " + d[2] + "–" + d[3] + "</div></td>" +
+    var rg = rcRange(d[0]);
+    return '<tr><td>' + esc(d[1]) + '<div class="cfg-when mono">defaults.' + esc(d[0]) + " · " + esc(rg.min) + "–" + esc(rg.max) + "</div></td>" +
       "<td>" + rcShow(bd[d[0]]) + "</td><td>" + (cd[d[0]] === undefined ? '<span class="muted">未设 = 用内置</span>' : "<b>" + rcShow(cd[d[0]]) + "</b>") + "</td>" +
       '<td><input id="rcD_' + d[0] + '" type="number" step="' + d[4] + '" placeholder="空 = 用内置" style="width:110px" oninput="rcNumCheck(\'' + d[0] + '\')">' +
       '<div id="rcD_' + d[0] + '_msg"></div></td>' +
@@ -2447,14 +2448,38 @@ function renderRcFlags() {
   $("rcFlags").innerHTML = head + rows + "</tbody>";
   // 值用属性赋(不靠 innerHTML 里的 selected):真 DOM 与哨兵的假 DOM 走同一条路
   RC_FLAGS.forEach(function (f) { var v = cf[f[0]]; $("rcF_" + f[0]).value = v === true ? "1" : v === false ? "0" : ""; });
-  RC_DEFAULTS.forEach(function (d) { var v = cd[d[0]]; $("rcD_" + d[0]).value = v == null ? "" : String(v); });
+  RC_DEFAULTS.forEach(function (d) { var v = cd[d[0]]; $("rcD_" + d[0]).value = v == null ? "" : String(v); $("rcD_" + d[0] + "_msg").innerHTML = ""; });
+  rcPubGate();
 }
-// 数值越界只提醒(服务端会整次拒,原文照摆);页面不替服务端当门
+// 数值范围:GET /admin/config 的 remote 元数据给了就用它(remote.ranges.defaults / remote.ranges / remote.limits.defaults,
+// 形状 {min, max} 或 [min, max]);没给就用契约 v0.2 的表(RC_DEFAULTS 第 3、4 格)。
+function rcRange(k) {
+  var r = rcRemote() || {}, d = RC_DEFAULTS.filter(function (x) { return x[0] === k; })[0];
+  var srcs = [r.ranges && r.ranges.defaults, r.ranges, r.limits && r.limits.defaults];
+  for (var i = 0; i < srcs.length; i++) {
+    var m = srcs[i] && srcs[i][k];
+    if (Array.isArray(m) && m.length === 2 && isFinite(Number(m[0])) && isFinite(Number(m[1]))) return { min: Number(m[0]), max: Number(m[1]), from: "server" };
+    if (m && typeof m === "object" && isFinite(Number(m.min)) && isFinite(Number(m.max))) return { min: Number(m.min), max: Number(m.max), from: "server" };
+  }
+  return { min: d[2], max: d[3], from: "contract" };
+}
+// 数值越界 / 不是数字 → 页面直接拦(领导者裁决 2026-09-29):红字写范围,发布按钮禁用,rcPublish 自己再核一次
+function rcNumProblem(k) {
+  var raw = ($("rcD_" + k).value || "").trim(), v = Number(raw), rg = rcRange(k);
+  if (raw === "") return "";
+  if (!isFinite(v)) return "要一个数字(" + rg.min + "–" + rg.max + ")";
+  if (v < rg.min || v > rg.max) return "要在 " + rg.min + "–" + rg.max + " 之间(现在 " + raw + ")";
+  return "";
+}
 function rcNumCheck(k) {
-  var d = RC_DEFAULTS.filter(function (x) { return x[0] === k; })[0], raw = ($("rcD_" + k).value || "").trim(), v = Number(raw);
-  var bad = raw !== "" && (!isFinite(v) || v < d[2] || v > d[3]);
-  $("rcD_" + k + "_msg").innerHTML = bad ? '<p class="warnmsg">超出 ' + d[2] + "–" + d[3] + ",服务端会拒绝整次发布。</p>" : "";
+  var p = rcNumProblem(k);
+  $("rcD_" + k + "_msg").innerHTML = p ? '<p class="err">' + esc(p) + ",不能发布。</p>" : "";
+  rcPubGate();
 }
+function rcNumBlock() {
+  return RC_DEFAULTS.map(function (d) { var p = rcNumProblem(d[0]); return p ? "defaults." + d[0] + " " + p : ""; }).filter(Boolean).join(";");
+}
+function rcPubGate() { $("rcPubBtn").disabled = !!rcNumBlock(); }
 
 function rcStyleText(st) {
   if (!st || typeof st !== "object") return '<span class="muted">未设 = 用内置</span>';
@@ -2586,7 +2611,7 @@ function rcCandidate() {
   RC_FLAGS.forEach(function (f) { var v = $("rcF_" + f[0]).value; if (v === "1") flags[f[0]] = true; else if (v === "0") flags[f[0]] = false; });
   RC_DEFAULTS.forEach(function (d) {
     var raw = ($("rcD_" + d[0]).value || "").trim();
-    if (raw !== "") defaults[d[0]] = isFinite(Number(raw)) ? Number(raw) : raw;   // 不是数字就原样送,让服务端 400
+    if (raw !== "") defaults[d[0]] = Number(raw);                  // 不是数字 / 越界已被 rcNumBlock 拦在发布之前
   });
   RC_COPY.forEach(function (c) {
     var zh = $("rcC_" + c[0] + "_zh").value || "", en = $("rcC_" + c[0] + "_en").value || "";
@@ -2624,7 +2649,8 @@ function rcServerErr(res) {
 
 function rcPublish() {
   if (!rcLive()) return;
-  var bad = rcExtraBlock();
+  var bad = [rcNumBlock(), rcExtraBlock()].filter(Boolean).join(";");
+  rcPubGate();
   if (bad) { cfgMsg("rcPub", "err", "没发:" + esc(bad)); return; }
   var cand = rcCandidate(), diff = rcDiff(rcSnap(), cand), cur = rcRev();
   if (!diff.length) { cfgMsg("rcPub", "note", "和当前 revision " + esc(cur) + " 一样,没什么可发布的。"); return; }
