@@ -2409,7 +2409,7 @@ function rcHistoryRows() {
 function rcPrevRevision() {
   var h = rcHistoryRows(), cur = rcRev();
   for (var i = 0; i < h.length; i++) if (Number(h[i].revision) < cur) return Number(h[i].revision);
-  return cur != null && cur > 1 ? cur - 1 : null;
+  return cur != null && cur >= 1 ? cur - 1 : null;       // to_revision 0 = 回到「从未发布」(全内置),服务端认
 }
 function renderRcHistory() {
   var h = rcHistoryRows(), cur = rcRev(), prev = rcPrevRevision();
@@ -2422,7 +2422,7 @@ function renderRcHistory() {
         : '<span class="cfg-when">' + (Number(x.revision) === cur ? "没有更早的版本" : "—") + "</span>";
       return '<tr><td class="mono">r' + esc(x.revision) + (Number(x.revision) === cur ? ' <span class="chip ok">当前</span>' : "") + "</td>" +
         "<td>" + esc(when(x.published_at || x.created_at)) + '</td><td class="mob-hide">' + esc(x.published_by || x.actor_email || "—") + "</td>" +
-        "<td>" + esc(x.note || (x.rollback_of != null ? "回退到 r" + x.rollback_of : "")) +
+        "<td>" + esc(x.note || (x.rollback_of != null ? "回退到 r" + x.rollback_of : Number(x.revision) === 0 ? "从未发布(全用内置)" : "")) +
         (x.mail_status === "failed" ? ' <span class="chip risk" title="改动告警信没发出去">告警信没发出</span>' : "") + "</td><td>" + act + "</td></tr>";
     }).join("") + "</tbody>";
 }
