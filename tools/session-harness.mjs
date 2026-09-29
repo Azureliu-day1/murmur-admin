@@ -504,6 +504,37 @@ const CFG_CASES = [
     r.push([mp.length === 1 && mp[0].in_price_key === "llm_flash_in_per_mtok" && mp[0].out_price_key === "llm_flash_out_per_mtok", "重新试打后生效 → 带上两个价键"]);
     return r;
   }],
+  ["q) 换 key:那家没挂在任何档 → 显示「试打模型」框;不填不发;填了试打与生效都带 model_id;挂了档的家不显示", async () => {
+    const K = fakeKey();
+    const fx = cfgFixture();
+    fx.providers.push({ id: "openai", kind: "llm", display_name: "OpenAI", endpoint: "https://api.openai.com/v1/chat/completions",
+      dialect: "openai_compatible", key_name: "OPENAI_API_KEY", default_params: {}, strip_params: [], enabled: true, updated_at: T0, host_allowlist: ["api.openai.com"] });
+    fx.keys.push({ name: "OPENAI_API_KEY", configured: false, source: null, writable: true, len: null, last4: null, sha8: null, updated_at: null, used_by: ["openai"] });
+    const w = await cfgWorld({ "/admin/config": () => [200, fx], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
+                               "/admin/config/key": () => [200, { ok: true, key: { last4: "q8Zt" }, reminder: "吊销旧 key" }] });
+    const r = [];
+    w.$("cfgKeyName").value = "DEEPSEEK_API_KEY"; await w.call("cfgKeyDirty");
+    r.push([hidden(w, "cfgKeyModelBox"), "DEEPSEEK(挂在 fast 档)→ 不显示试打模型框"]);
+    w.$("cfgKeyName").value = "OPENAI_API_KEY"; await w.call("cfgKeyDirty");
+    r.push([!hidden(w, "cfgKeyModelBox"), "OPENAI(没挂档)→ 显示试打模型框"]);
+    w.$("cfgKeyVal").value = K; w.$("cfgKeyModel").value = "";
+    await w.call("cfgKeyProbe");
+    r.push([w.posts("/admin/config/probe").length === 0 && w.$("cfgKeyMsg").innerHTML.includes("这家还没用在任何档,试打要指定一个模型 id"),
+            "模型没填 → 不发试打,提示要指定模型 id"]);
+    w.$("cfgKeyModel").value = "gpt-x-mini"; await w.call("cfgKeyDirty");
+    await w.call("cfgKeyProbe");
+    const pb = w.posts("/admin/config/probe").map(x => JSON.parse(x.body));
+    r.push([pb.length === 1 && pb[0].model_id === "gpt-x-mini" && pb[0].key_name === "OPENAI_API_KEY", "填了 → 试打带 model_id"]);
+    w.$("cfgKeyModel").value = "gpt-other";                     // 试打后改模型(不经 oninput)
+    await w.call("cfgKeyApply");
+    r.push([w.posts("/admin/config/key").length === 0, "试打后改了模型 → 生效不发"]);
+    w.$("cfgKeyModel").value = "gpt-x-mini";
+    await w.call("cfgKeyDirty"); w.$("cfgKeyVal").value = K;
+    await w.call("cfgKeyProbe"); await w.call("cfgKeyApply");
+    const kp = w.posts("/admin/config/key").map(x => JSON.parse(x.body));
+    r.push([kp.length === 1 && kp[0].model_id === "gpt-x-mini" && w.$("cfgKeyVal").value === "" && !domHas(w, K), "生效带 model_id;框清空、DOM 无残留"]);
+    return r;
+  }],
   ["l) 单价:先确认「影响下一把 lease 的预扣」,取消就不发", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/pricing": () => [200, { ok: true }] });
     const r = [[w.$("cfgPricing").innerHTML.includes("asr_rt_micros_per_second"), "单价表列出了各项"]];

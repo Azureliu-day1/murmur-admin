@@ -412,6 +412,12 @@ table.mini tr.bad td{color:#b0392a}
                    值只在这个输入框里待到「生效」为止,提交后立刻清空,不进 localStorage、URL、日志。 -->
               <input id="cfgKeyVal" type="password" autocomplete="off" spellcheck="false"
                      data-lpignore="true" data-1p-ignore placeholder="粘贴上游控制台新建的 key" oninput="cfgKeyDirty()">
+              <!-- 这家还没挂在任何一档上时,服务端试打新 key 不知道用哪个模型 → 要人指定(否则 400 need_model_id) -->
+              <div id="cfgKeyModelBox" class="hidden">
+                <label for="cfgKeyModel">试打模型</label>
+                <input id="cfgKeyModel" type="text" spellcheck="false" placeholder="模型 id,照这家的写法" oninput="cfgKeyDirty()">
+                <p class="note" style="margin-top:0">这家还没用在任何档,试打要指定一个模型 id。</p>
+              </div>
               <div class="row">
                 <button class="btn quiet" onclick="cfgKeyProbe()">试打</button>
                 <button class="btn" id="cfgKeyApply" disabled onclick="cfgKeyApply()">生效</button>
@@ -1851,6 +1857,7 @@ function renderCfgKeys() {
   }).join("");
   var firstOpen = ks.filter(function (k) { return !cfgKeyLocked(k.name); })[0];
   sel.value = (keep && !cfgKeyLocked(keep)) ? keep : (firstOpen ? firstOpen.name : "");
+  cfgKeyModelShow();
 }
 
 // pricing 回包形状两种都认:{key: 数} / {key: {micros_per_unit|value, note, updated_at}} / [{key, micros_per_unit, …}]
@@ -1922,7 +1929,7 @@ function cfgSig(form) {
   if (form === "cfgTier") return JSON.stringify([cfgTierCur, $("cfgTierProv").value, ($("cfgTierModel").value || "").trim(),
                                                  $("cfgTierIn").value || "", $("cfgTierOut").value || ""]);
   if (form === "cfgProv") return JSON.stringify(cfgProvCandidate());
-  if (form === "cfgKey") return JSON.stringify([$("cfgKeyName").value, cfgKeyGen]);
+  if (form === "cfgKey") return JSON.stringify([$("cfgKeyName").value, cfgKeyGen, ($("cfgKeyModel").value || "").trim()]);   // 模型不是秘密,可以进签名
   return "";
 }
 function cfgDirty(form) { delete cfgProbeOk[form]; cfgSetApply(form, false); }
@@ -2143,7 +2150,22 @@ function cfgProvApply() {
 }
 
 // ── 密钥 ──
-function cfgKeyDirty() { cfgKeyGen++; cfgDirty("cfgKey"); }
+function cfgKeyDirty() { cfgKeyGen++; cfgDirty("cfgKey"); cfgKeyModelShow(); }
+// 这家挂在哪一档上就用那一档的模型;没挂 → null(要人在「试打模型」框里填)
+function cfgTierModelOf(pid) {
+  var m = (CONFIG && CONFIG.models) || {};
+  if (m.fast && m.fast.provider_id === pid) return m.fast.model_id;
+  if (m.smart && m.smart.provider_id === pid) return m.smart.model_id;
+  return null;
+}
+function cfgKeyNeedsModel() {
+  var p = cfgKeyTarget($("cfgKeyName").value);
+  return !!(p && p.kind === "llm" && !cfgTierModelOf(p.id));
+}
+function cfgKeyModelShow() {
+  if (cfgKeyNeedsModel()) $("cfgKeyModelBox").classList.remove("hidden");
+  else $("cfgKeyModelBox").classList.add("hidden");
+}
 function cfgKeyTarget(name) {
   var ps = cfgProviders();
   for (var i = 0; i < ps.length; i++) if (ps[i].key_name === name) return ps[i];
@@ -2155,8 +2177,8 @@ function cfgKeyProbe() {
   var p = cfgKeyTarget(name);
   if (!p) { cfgMsg("cfgKey", "err", "没有哪家供应商用 " + esc(name) + " —— 没法试打,也就不能在这里换。"); return; }
   if (!$("cfgKeyVal").value) { cfgMsg("cfgKey", "err", "新 key 没填。"); return; }
-  var model = p.kind === "llm" ? (((CONFIG.models || {}).fast || {}).provider_id === p.id ? CONFIG.models.fast.model_id
-                                 : ((CONFIG.models || {}).smart || {}).provider_id === p.id ? CONFIG.models.smart.model_id : undefined) : undefined;
+  var model = p.kind === "llm" ? (cfgTierModelOf(p.id) || ($("cfgKeyModel").value || "").trim() || undefined) : undefined;
+  if (p.kind === "llm" && !model) { cfgKeyModelShow(); cfgMsg("cfgKey", "err", "这家还没用在任何档,试打要指定一个模型 id。"); return; }
   // value 直接从框里读进请求体,不经过任何变量
   return cfgRunProbe("cfgKey", { kind: p.kind, provider_id: p.id, key_name: name, model_id: model, value: $("cfgKeyVal").value });
 }
@@ -2164,7 +2186,9 @@ function cfgKeyApply() {
   if (!cfgIsOk("cfgKey")) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", "先试打,回 OK 才能生效。"); return; }
   var name = $("cfgKeyName").value;
   if (cfgKeyLocked(name)) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", esc(name) + ":" + CFG_KEY_LOCKED_NOTE + "。"); return; }
-  var body = JSON.stringify({ name: name, value: $("cfgKeyVal").value });
+  var pk = cfgKeyTarget(name);
+  var km = pk && pk.kind === "llm" && !cfgTierModelOf(pk.id) ? ($("cfgKeyModel").value || "").trim() : "";
+  var body = JSON.stringify(km ? { name: name, value: $("cfgKeyVal").value, model_id: km } : { name: name, value: $("cfgKeyVal").value });
   $("cfgKeyVal").value = "";                  // ⛔ 先清框再发:不管成没成功,值都不再留在页面上
   cfgKeyDirty();
   return cfgPost("key", body).then(function (res) {
