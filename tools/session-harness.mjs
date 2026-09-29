@@ -219,27 +219,34 @@ function cfgFixture(extra) {
   }, extra || {});
 }
 
-// 远程配置夹具:形状照契约 v0.2 + S 组简报(GET /admin/config 多一格 remote);S 上线后按真回包对齐
+// 远程配置夹具:形状照服务端真实现(murmur-all-remote 41c22dfb remoteAdminView):
+// current = 下发外壳;builtin.styles[场景] = {text: 生产原文, knobs: 编辑器起始值};builtin 里 null = 客户端内置、服务端没登记
 function rcFixture() {
+  const env = { schema_version: 1, revision: 4, published_at: T0, refresh_s: 300,
+    max_age_s: { flags: 86400, defaults: 86400, styles: 604800, copy: 604800 },
+    flags: { kill_ai_card: false },
+    defaults: { hud_done_seconds: 2.5 },
+    styles: { chat: { register: "casual", punctuation: "light", keep_technical: true, structure: "prose" } },
+    copy: { update_available: { zh: "有新版了,去看看", en: "New version out" } } };
   return cfgFixture({ remote: {
-    schema_version: 1, revision: 4, published_at: T0, published_by: "admin@example.com", note: "聊天改随意", refresh_s: 300,
-    clients: "0.53 及以上的 Mac 客户端会吃到;更旧的版本拿不到、也不受影响。",
-    snapshot: {
-      flags: { kill_ai_card: false },
-      defaults: { hud_done_seconds: 2.5 },
-      styles: { chat: { register: "casual", punctuation: "light", keep_technical: true, structure: "prose" } },
-      copy: { update_available: { zh: "有新版了,去看看", en: "New version out" } } },
+    schema_version: 1, revision: 4, published_at: T0, published_by: "admin@example.com", note: "聊天改随意", mail_status: "sent",
+    current: env,
+    clients: "schema_version 1:Mac 0.53 及以上的客户端会吃到这份配置;0.53 之前的版本拿不到、也不受影响;iOS 不接。",
     builtin: {
-      flags: { scene_styling_default_on: true, nextword_default_on: true, ai_card_default_on: false, kill_scene_styling: false, kill_ai_card: false },
-      defaults: { hud_done_seconds: 1.8, parked_ttl_seconds: 60, quota_warn_ratio: 0.8 },
-      styles: { email: { register: "formal", punctuation: "complete", keep_technical: true, structure: "prose" },
-                chat: { register: "neutral", punctuation: "light", keep_technical: true, structure: "prose" } },
-      copy: { quota_exhausted_free: { zh: "免费额度用完了", en: "Free quota used up" },
-              quota_exhausted_pro: { zh: "本月额度用完了", en: "Monthly quota used up" },
-              update_available: { zh: "有新版本", en: "Update available" } } },
-    history: [{ revision: 4, published_at: T0, published_by: "admin@example.com", note: "聊天改随意" },
-              { revision: 3, published_at: T0, published_by: "admin@example.com", note: "HUD 2.5 秒" },
-              { revision: 2, published_at: T0, published_by: "admin@example.com", note: "" }] } });
+      source: "ime-mac 88b318ff",
+      flags: { scene_styling_default_on: true, nextword_default_on: true, ai_card_default_on: null, kill_scene_styling: false, kill_ai_card: false },
+      defaults: { hud_done_seconds: 1.8, parked_ttl_seconds: null, quota_warn_ratio: null },
+      styles: { email: { text: "The text goes into an email. Prefer complete, courteous sentences.",
+                         knobs: { register: "formal", punctuation: "complete", keep_technical: false, structure: "prose" } },
+                chat: { text: "The text will be sent as a chat message.",
+                        knobs: { register: "casual", punctuation: "light", keep_technical: false, structure: "prose" } },
+                shortField: { text: null, knobs: { register: "neutral", punctuation: "light", keep_technical: false, structure: "prose" } } },
+      copy: { quota_exhausted_free: null, quota_exhausted_pro: null,
+              update_available: { zh: "新版本 {version} · 下载", en: "New version {version} · Download" } } },
+    history: [{ revision: 4, published_at: T0, published_by: "admin@example.com", note: "聊天改随意", rollback_of: null, mail_status: "sent" },
+              { revision: 3, published_at: T0, published_by: "admin@example.com", note: "HUD 2.5 秒", rollback_of: null, mail_status: "failed" },
+              { revision: 2, published_at: T0, published_by: "admin@example.com", note: null, rollback_of: null, mail_status: "sent" }],
+    limits: { preview_per_min: 6, extra_max_chars: 200 } } });
 }
 
 async function cfgWorld(routes, opt = {}) {
@@ -584,12 +591,14 @@ const CFG_CASES = [
     r.push([m.includes("warnmsg") && m.includes("ignore") && !m.includes('class="err"'), "含 ignore → 黄色提醒,不是红色拦截"]);
     await w.call("rcPublish");
     const pb = w.posts("/admin/config/remote").map(x => JSON.parse(x.body));
-    r.push([pb.length === 2 && pb[1].snapshot.styles.email.extra === "please ignore the stiff tone", "角色词照发,extra 原样在候选里"]);
+    r.push([pb.length === 2 && pb[1].config.styles.email.extra === "please ignore the stiff tone", "角色词照发,extra 原样在候选里"]);
     return r;
   }],
   ["s) 远程配置 · 发布 = 先拿 nonce 再 POST;确认取消不发;没改动不发;服务端 400 原文(message / code / details)原样显示", async () => {
-    let reply = [400, { error: { message: "defaults.hud_done_seconds out of range [0.8, 4.0]: 9", code: "invalid_value",
-                                 details: [{ path: "defaults.hud_done_seconds", reason: "range" }] } }];
+    // 形状照服务端 remoteRpcFail:{invalid:{path,rule}, error:{message, code:"invalid_config", rid, reason}}
+    let reply = [400, { invalid: { path: "defaults.hud_done_seconds", rule: "range" },
+                        error: { message: "配置不合规矩(defaults.hud_done_seconds · range),整次没发布", from: "murmur", rid: "r-1", code: "invalid_config",
+                                 reason: "defaults.hud_done_seconds:range" } }];
     const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()], "/admin/config/remote": () => reply });
     const r = [];
     await w.call("rcPublish");
@@ -608,17 +617,19 @@ const CFG_CASES = [
     const body = pb[0] && JSON.parse(pb[0].body);
     r.push([rq.join(",") === "/admin/config/challenge,/admin/config/remote", "顺序:先 challenge,再 POST remote"]);
     r.push([w.noncesOk(), "POST remote 带 x-admin-confirm = 刚发的一次性 nonce"]);
-    r.push([body && body.base_revision === 4 && body.snapshot.defaults.hud_done_seconds === 9 && body.snapshot.styles.chat &&
-            body.snapshot.copy.update_available.zh === "有新版了,去看看", "请求体 = 完整候选快照(没改的键照带)+ base_revision 4"]);
+    r.push([body && body.expect_revision === 4 && body.config.defaults.hud_done_seconds === 9 && body.config.styles.chat &&
+            body.config.copy.update_available.zh === "有新版了,去看看" && !("revision" in body.config) && !("refresh_s" in body.config),
+            "请求体 = {expect_revision:4, config: 完整候选快照(没改的键照带,不夹下发外壳字段)}"]);
     const em = w.$("rcPubMsg").innerHTML;
-    r.push([em.includes("out of range [0.8, 4.0]: 9") && em.includes("invalid_value") && em.includes("defaults.hud_done_seconds") && em.includes("整次没发布"),
+    r.push([em.includes("配置不合规矩(defaults.hud_done_seconds · range)") && em.includes("invalid_config") && em.includes("&quot;rule&quot;:&quot;range&quot;") && em.includes("整次没发布"),
             "400 → 服务端原文 message + code + details 原样摆出来,并写明整次没发布"]);
-    reply = [200, { ok: true, revision: 5 }];
+    reply = [200, { ok: true, action: "config.remote.publish", revision: 5, previous: 4, warnings: [{ path: "styles.email.extra", word: "system" }], mail: "pending" }];
     const gets0 = w.reqs.filter(q => q.path === "/admin/config" && q.method === "GET").length;
     w.$("rcD_hud_done_seconds").value = "3";
     await w.call("rcPublish");
     r.push([w.$("rcPubMsg").innerHTML.includes("发布了 revision 5") && w.posts("/admin/config/remote").length === 2, "合法 → 发出,回 revision 5"]);
     r.push([w.reqs.filter(q => q.path === "/admin/config" && q.method === "GET").length > gets0, "发布成功后重拉 /admin/config"]);
+    r.push([w.$("rcPubMsg").innerHTML.includes("warnmsg") && w.$("rcPubMsg").innerHTML.includes("styles.email.extra「system」"), "服务端回的角色词告警黄色显示"]);
     r.push([w.noncesOk(), "两次发布各用一个 nonce,没有复用"]);
     return r;
   }],
@@ -640,7 +651,7 @@ const CFG_CASES = [
     w.st.confirm = true;
     await w.call("rcRollback");
     const rb = w.posts("/admin/config/remote/rollback").map(x => JSON.parse(x.body));
-    r.push([rb.length === 1 && rb[0].base_revision === 4 && rb[0].to_revision === 3, "发出 {base_revision:4, to_revision:3}"]);
+    r.push([rb.length === 1 && rb[0].expect_revision === 4 && rb[0].to_revision === 3, "发出 {expect_revision:4, to_revision:3}"]);
     r.push([w.noncesOk(), "回退也带一次性 nonce"]);
     r.push([w.$("rcHistMsg").innerHTML.includes("配置已被后来的改动更新,刷新后再试"), "409 stale → 「配置已被后来的改动更新,刷新后再试」"]);
     const fx1 = rcFixture(); fx1.remote.revision = 1; fx1.remote.history = [{ revision: 1, published_at: T0, published_by: "admin@example.com" }];
@@ -650,8 +661,11 @@ const CFG_CASES = [
   }],
   ["u) 远程配置 · 预览:发的是候选 styles、不带 nonce;结果标「只供人眼看,不是质量证明」;结果不落 localStorage / 全局变量;改了候选提示结果旧了", async () => {
     const MARK = "PREVIEW_OUT_" + Date.now();
-    let reply = [200, { results: ["email", "chat", "code", "aiAssistant", "document"].map((sc, i) =>
-                 ({ scene: sc, input: "样例 " + i, output: MARK + "_" + i, latency_ms: 400 + i })), cost_micro_usd: 90 }];
+    // 形状照服务端 handleRemotePreview:samples[];任一条失败整体 ok:false,但 HTTP 200、其余照有结果
+    let reply = [200, { ok: false, note: "只供人眼看,不是质量证明", samples: ["email", "chat", "document", "code", "aiAssistant"].map((sc, i) =>
+                 (i === 4 ? { id: "s5", scene: sc, input: "样例 " + i, style_source: "builtin", ok: false, error: "timeout", latency_ms: 10000 }
+                          : { id: "s" + (i + 1), scene: sc, input: "样例 " + i, style_source: i === 0 ? "candidate" : "builtin", ok: true, output: MARK + "_" + i, latency_ms: 400 + i })),
+                 cost_micro_usd: 90, spent_today_micro_usd: 300, budget_micro_usd: 1000000, warnings: [] }];
     const w = await cfgWorld({ "/admin/config": () => [200, rcFixture()], "/admin/config/remote/preview": () => reply });
     const r = [];
     w.$("rcSt_email_on").checked = true; w.$("rcSt_email_register").value = "casual"; w.$("rcSt_email_extra").value = "像同事之间的口气";
@@ -662,7 +676,8 @@ const CFG_CASES = [
             "发的是候选 styles(邮件的新旋钮 + extra,chat 照旧)"]);
     r.push([!pv[0].confirm && !w.reqs.some(q => q.path === "/admin/config/challenge"), "预览不带 nonce、不要 challenge(它不写配置)"]);
     r.push([w.$("rcPreview").innerHTML.includes("只供人眼看,不是质量证明"), "结果那一格标了「只供人眼看,不是质量证明」"]);
-    r.push([[0, 1, 2, 3, 4].every(i => w.$("rcPreview").innerHTML.includes(MARK + "_" + i)), "5 条结果都画出来了"]);
+    r.push([[0, 1, 2, 3].every(i => w.$("rcPreview").innerHTML.includes(MARK + "_" + i)) && w.$("rcPreview").innerHTML.includes("出错:timeout"),
+            "整体 ok:false 也照画:4 条结果 + 失败那条标「出错:timeout」"]);
     r.push([![...w.store.values()].some(v => String(v).includes(MARK)), "localStorage 里没有预览结果"]);
     r.push([!deepHas(w.win, MARK), "页面全局变量(深搜)里没有预览结果"]);
     r.push([w.posts("/admin/config/remote").length === 0, "预览没顺手发布"]);
@@ -681,9 +696,13 @@ const CFG_CASES = [
     const r = [[f.includes("1.8") && f.includes("<b>2.5</b>") && f.includes("r4"), "HUD 停留:内置 1.8 vs 远程 2.5,最后改动 r4"],
                [(f.match(/chip pub/g) || []).length === 3, "三个公开键标了「公开」"],
                [f.includes("未设 = 用内置"), "没下发的键写「未设 = 用内置」"],
-               [st.includes("当前远程:随意") && st.includes("内置:正式"), "场景风格:chat 远程随意,email 内置正式"],
+               [st.includes("当前远程:随意") && st.includes("Prefer complete, courteous sentences") && st.includes("没有场景风格段"),
+                "场景风格:chat 远程随意;内置那格是生产原文(email),shortField 写没有风格段"],
+               [w.$("rcSt_email_register").value === "formal" && w.$("rcSt_email_keep_technical").value === "0", "没覆盖的场景,旋钮起始值 = 服务端给的 knobs"],
+               [f.includes("客户端内置"), "服务端没登记的内置值(null)写「客户端内置」"],
+               [w.$("rcHistory").innerHTML.includes("告警信没发出"), "r3 告警信 failed → 历史里标出来"],
                [w.$("rcSt_chat_on").checked === true && w.$("rcSt_email_on").checked === false, "有远程覆盖的场景勾上,没有的不勾"],
-               [cp.includes("免费额度用完了") && cp.includes("有新版了,去看看"), "文案:内置 vs 远程都显示"],
+               [cp.includes("新版本 {version} · 下载") && cp.includes("有新版了,去看看"), "文案:内置 vs 远程都显示"],
                [w.$("rcSchema").innerHTML.includes("0.53"), "schema_version 说明写了 0.53 及以上会吃到"],
                [w.$("rcVer").textContent.includes("revision 4"), "页眉 revision 4"],
                [w.$("rcD_hud_done_seconds").value === "2.5" && w.$("rcF_kill_ai_card").value === "0" && w.$("rcF_nextword_default_on").value === "",
@@ -691,6 +710,11 @@ const CFG_CASES = [
     const w2 = await cfgWorld({ "/admin/config": () => [200, cfgFixture()] });
     r.push([!hidden(w2, "rcNone") && hidden(w2, "rcBody") && w2.$("rcNone").innerHTML.includes("还没有远程配置"), "没有 remote → 一句说明,三卡不画"]);
     r.push([w2.$("cfgTiers").innerHTML.includes("deepseek-v4-flash"), "模型与供应商那一块照常"]);
+    const fx3 = cfgFixture({ remote: { error: "remote_read_failed" } });
+    const w3 = await cfgWorld({ "/admin/config": () => [200, fx3] });
+    await w3.call("rcPublish");
+    r.push([hidden(w3, "rcBody") && w3.$("rcNone").innerHTML.includes("remote_read_failed") && w3.posts("/admin/config/remote").length === 0,
+            "服务端读挂了(remote.error)→ 显示原因、三卡不画、发布不发"]);
     return r;
   }],
   ["l) 单价:先确认「影响下一把 lease 的预扣」,取消就不发", async () => {
