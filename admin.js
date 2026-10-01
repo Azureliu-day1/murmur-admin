@@ -451,9 +451,10 @@ function renderUsers() {
 }
 
 $("q").oninput = function () { query = this.value.trim(); renderUsers(); };
-Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (b) {
+// ⚠️ 只认带 data-f 的(用户表那一排):申请名额那一排筛选也用 .tab 的样子,不许被这里一起摘掉 on
+Array.prototype.forEach.call(document.querySelectorAll(".tab[data-f]"), function (b) {
   b.onclick = function () {
-    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (x) { x.classList.remove("on"); });
+    Array.prototype.forEach.call(document.querySelectorAll(".tab[data-f]"), function (x) { x.classList.remove("on"); });
     b.classList.add("on"); filter = b.getAttribute("data-f"); renderUsers();
   };
 });
@@ -1031,6 +1032,11 @@ function loadAccess() {
     });
 }
 
+// 申请名额的筛选(2026-10-01 加「候补」):只在页面里筛 —— /admin/access-requests 的请求不变
+var ACCESS_FILTERS = [["all", "全部"], ["new", "待处理"], ["waitlisted", "候补"], ["approved", "开了"], ["declined", "没开"]];
+var accessFilter = "all";
+function accessFilterSet(f) { accessFilter = f; renderAccess(); }
+
 function accessRowById(id) {
   var rows = (ACCESS && ACCESS.requests) || [];
   for (var i = 0; i < rows.length; i++) { if (rows[i].id === id) return rows[i]; }
@@ -1050,15 +1056,28 @@ function renderAccess() {
   } else {
     $("accessNav").classList.add("hidden");
   }
+  var waitN = c.waitlisted != null ? Number(c.waitlisted)
+    : rows.filter(function (r) { return r.status === "waitlisted"; }).length;
   $("accessCount").innerHTML = ACCESS
-    ? "待处理 " + esc(pending) + " · 开了 " + esc(Number(c.approved || 0)) +
+    ? "待处理 " + esc(pending) + " · 候补 " + esc(waitN) + " · 开了 " + esc(Number(c.approved || 0)) +
       " · 没开 " + esc(Number(c.declined || 0)) + " · 共 " + esc(Number(c.total || 0)) + " 条"
     : "";
+
+  // 筛选条:每次重画(事件走 data-click 委托,不靠文件开头那段 .tab 绑定)
+  $("accessFilters").innerHTML = ACCESS_FILTERS.map(function (f) {
+    return '<button class="tab' + (accessFilter === f[0] ? " on" : "") + '"' + actAttr("click", "accessFilterSet", [f[0]]) + '>' +
+      esc(f[1]) + "</button>";
+  }).join("");
 
   if (!rows.length) {
     $("accessTable").innerHTML =
       '<tbody><tr><td class="muted">还没有人从官网申请过名额。' +
       '(表单在 murmur 官网「申请名额」那一栏,匿名就能填。)</td></tr></tbody>';
+    return;
+  }
+  if (accessFilter !== "all") rows = rows.filter(function (r) { return r.status === accessFilter; });
+  if (!rows.length) {
+    $("accessTable").innerHTML = '<tbody><tr><td class="muted">这一类没有申请。</td></tr></tbody>';
     return;
   }
 
@@ -1078,6 +1097,10 @@ function renderAccess() {
     var state;
     if (isNew) {
       state = "<b>新</b>";
+    } else if (r.status === "waitlisted") {
+      // 对外只说「已进候补」,不报第几位;后台这里看入队时间(重试不改它)
+      state = '<span class="chip risk">候补</span>' +
+        '<div class="muted" data-style="font-size:11.5px">入队 ' + esc(when(r.queued_at || r.created_at)) + "</div>";
     } else {
       state = (r.status === "approved" ? "开了名额" : "没开") +
         '<div class="muted" data-style="font-size:11.5px">' +
@@ -1114,7 +1137,7 @@ function accessAct(id, grant) {
     reason = prompt("给 " + r.email + " 开名额。\n\n备注(可留空):谁介绍的 / 为什么给。");
     if (reason === null) return;                    // 取消 = 什么都没发生
     if (r.has_seat && !confirm(r.email + " 已经有名额了。还要再开一次吗?\n\n" +
-        "(不会重复给什么,只会把封禁/暂停解回 active,并且把这条申请标成处理过。)")) return;
+        "(不会重复给什么,只把这条申请标成处理过。被封禁 / 暂停的人这里开不了 —— 会被拒绝且不改状态。)")) return;
   } else {
     reason = prompt("不给 " + r.email + " 开。\n\n为什么?(必填 —— 过几个月再翻这条,只剩它说得清)");
     if (reason === null) return;
@@ -2187,7 +2210,7 @@ function argStr(s) { return s == null ? "" : String(s); }
 function actAttr(type, fn, args) {
   return ' data-' + type + '="' + fn + '"' + (args && args.length ? ' data-args="' + esc(JSON.stringify(args)) + '"' : "");
 }
-var ACTION_NAMES = ["accessAct", "cfgDirty", "cfgKeyApply", "cfgKeyDirty", "cfgKeyProbe", "cfgPriceApply", "cfgProvApply", "cfgProvClose", "cfgProvEdit", "cfgProvProbe", "cfgRollback", "cfgTierApply", "cfgTierClose", "cfgTierEdit", "cfgTierProbe", "closeDrawer", "doAction", "grantSeat", "load", "logout", "mintInvite", "rcExtraShow", "rcNumCheck", "rcPreview", "rcPublish", "rcRollback", "rcSceneToggle", "rcStylesDirty", "reconcile", "revokeInvite", "toggleHash"];
+var ACTION_NAMES = ["accessAct", "accessFilterSet", "cfgDirty", "cfgKeyApply", "cfgKeyDirty", "cfgKeyProbe", "cfgPriceApply", "cfgProvApply", "cfgProvClose", "cfgProvEdit", "cfgProvProbe", "cfgRollback", "cfgTierApply", "cfgTierClose", "cfgTierEdit", "cfgTierProbe", "closeDrawer", "doAction", "grantSeat", "load", "logout", "mintInvite", "rcExtraShow", "rcNumCheck", "rcPreview", "rcPublish", "rcRollback", "rcSceneToggle", "rcStylesDirty", "reconcile", "revokeInvite", "toggleHash"];
 function dispatchAct(type, e) {
   var el = e && e.target && e.target.closest ? e.target.closest("[data-" + type + "]") : null;
   if (!el) return;

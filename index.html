@@ -109,7 +109,9 @@
     <div class="section" id="access">
       <div class="eyebrow">access · <b>申请名额</b> <span id="accessCount" class="muted"></span></div>
       <div class="card">
+        <div class="filters" id="accessFilters"></div>
         <div class="tablebox"><table id="accessTable"></table></div>
+        <p class="note">「候补」= 名额满时进来的申请,按入队先后由下面「开放阶段 · 放行」放出,这里不一个个开(免得插队)。</p>
         <p class="note">从官网「申请名额」表单进来的人。<b>开名额</b>走的是和上面「给一个人开名额」
           一模一样的那条路(没账号会替他建、然后发一封通知信);<b>不开</b>只是把这条标掉,
           不通知对方 —— 要不要回他一句,由你决定。两个动作都会留在下面的操作留痕里。</p>
@@ -283,7 +285,8 @@
       <div class="card">
         <div class="eyebrow">seat · <b>给一个人开名额</b></div>
         <p class="note">填邮箱就行。没有账号会替他建一个,然后发一封「名额开好了」的信。
-          他之后正常登录即可 —— 已经有名额的人再开一次不会重复,只会把封禁/暂停解回来。</p>
+          他之后正常登录即可 —— 已经有名额的人再开一次不会重复;被封禁 / 暂停的人这里开不了:
+          会被拒绝,而且不改他的状态(要解封去上面用户详情里点「解封」)。</p>
         <input id="seatEmail" type="email" placeholder="someone@example.com" autocomplete="off">
         <input id="seatReason" type="text" placeholder="备注(可留空):谁介绍的 / 为什么给">
         <button class="btn" data-click="grantSeat">开名额</button>

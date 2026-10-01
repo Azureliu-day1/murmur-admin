@@ -283,9 +283,9 @@ async function cfgWorld(routes, opt = {}) {
       const n = "nonce-" + (++st.nonces); st.issued.push(n);
       return Promise.resolve(res(200, { nonce: n, expires_in: 300 }));
     }
-    if (path === "/admin/stats") return Promise.resolve(res(200, { admin: "admin@example.com", server_time: T0, overview: {}, users: [],
+    if (path === "/admin/stats" && !routes[path]) return Promise.resolve(res(200, { admin: "admin@example.com", server_time: T0, overview: {}, users: [],
       anomalies: [], plans: [], audit: [], invites: [], daily: [], features: [], feature_totals: [], apis: {} }));
-    if (path === "/admin/access-requests") return Promise.resolve(res(200, { requests: [], counts: {} }));
+    if (path === "/admin/access-requests" && !routes[path]) return Promise.resolve(res(200, { requests: [], counts: {} }));
     const h = routes[path];
     if (!h) return Promise.resolve(res(404, { error: { message: "no route" } }));
     const [code, body] = h(init.body ? JSON.parse(init.body) : null);
@@ -792,6 +792,29 @@ const CFG_CASES = [
     const pp = w.posts("/admin/config/pricing");
     r.push([pp.length === 1 && pp[0].body === JSON.stringify({ key: "asr_rt_micros_per_second", value: 60 }), "确认 → 一发 POST pricing {key, value:60}"]);
     r.push([w.noncesOk(), "单价那一发也带一次性 nonce"]);
+    return r;
+  }],
+  // ── 2026-10-01 内测 → 公测:申请名额栏的候补(A3)──────────────────────
+  ["x) 申请名额:候补有筛选、有状态、没有按钮;开座说明不再说「解回」", async () => {
+    const reqs = [
+      { id: "11111111-1111-4111-8111-111111111111", email: "new@example.com", status: "new", created_at: T0, has_seat: false, has_user: true },
+      { id: "22222222-2222-4222-8222-222222222222", email: "wait@example.com", status: "waitlisted", created_at: T0, queued_at: T0, has_seat: false, has_user: true },
+      { id: "33333333-3333-4333-8333-333333333333", email: "done@example.com", status: "approved", created_at: T0, handled_by: "admin@example.com", handled_at: T0, has_seat: true, has_user: true },
+    ];
+    const w = await cfgWorld({ "/admin/access-requests": () => [200, { requests: reqs, counts: { new: 1, waitlisted: 1, approved: 1, declined: 0, total: 3 } }] });
+    const tbl = () => w.$("accessTable").innerHTML;
+    const r = [];
+    r.push([w.$("accessFilters").innerHTML.includes("候补") && w.$("accessFilters").innerHTML.includes(btnSig("accessFilterSet", "waitlisted")), "筛选条有「候补」"]);
+    r.push([w.$("accessCount").innerHTML.includes("候补 1"), "计数行写了候补 1"]);
+    r.push([tbl().includes("wait@example.com") && tbl().includes(">候补<") && tbl().includes("入队"), "候补那一行显示「候补」+ 入队时间"]);
+    r.push([btnCount(tbl(), 'data-click="accessAct"') === 2, "只有「新」那一行有开 / 不开两个按钮,候补行没有(不插队)"]);
+    await w.call("accessFilterSet", "waitlisted");
+    r.push([tbl().includes("wait@example.com") && !tbl().includes("new@example.com") && !tbl().includes("done@example.com"), "点「候补」只剩候补那一行"]);
+    r.push([w.$("accessFilters").innerHTML.includes('class="tab on"' + ' ' + btnSig("accessFilterSet", "waitlisted")), "「候补」那颗是选中态"]);
+    await w.call("accessFilterSet", "declined");
+    r.push([tbl().includes("这一类没有申请"), "空的一类有一句话,不是空表"]);
+    r.push([!(HTML + CODE).includes("解回"), "「解回 active / 解回来」的过时说法全文没了(实际:拒绝且不改状态)"]);
+    r.push([CODE.includes("querySelectorAll(\".tab[data-f]\")"), "用户表那排 tab 的绑定只认 data-f,不会摘掉申请栏的选中态"]);
     return r;
   }],
 ];
