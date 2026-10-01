@@ -119,6 +119,66 @@
       </div>
     </div>
 
+    <!-- ── 开放阶段(2026-10-01,设计稿 DESIGN-beta-phases v0.2)─────────────
+         内测 / 公测、名额上限、两档额度、全站月预算、放行、staff 名单 —— 全部数字都在这里调。
+         每个改动:先显示「改前 → 改后」+ 影响一句 → 确认 → 一次性确认码 → 写 → 重拉 → 下面留痕最近 10 条。
+         ⛔ 页面上的拦截只是先挡一道,真门在服务端(管理员 + 确认码 + 范围校验 + 审计)。
+         整块默认藏着:access_get 回 403(不是管理员)就一直藏着。 -->
+    <div class="section hidden" id="phSec">
+      <div class="eyebrow">access phase · <b>开放阶段</b> <span class="muted" id="phVer"></span></div>
+      <div class="card" id="phNone"></div>
+      <div id="phBody" class="hidden">
+        <div class="card" id="phSummary"></div>
+        <div class="section grid g2" data-style="margin-top:12px;margin-bottom:0">
+          <div class="card">
+            <div class="eyebrow">phase · <b>阶段与受理</b></div>
+            <div id="phPhase"></div>
+            <div id="phPhaseMsg"></div>
+            <p class="note">「转为公测」后新申请未满就当场开座、满了进候补;「切回内测」只停自动开座,已开的名额不收回。
+              两个都不碰注册开关。暂停受理 = 新申请照记,但不开座、不进候补。</p>
+          </div>
+          <div class="card">
+            <div class="eyebrow">caps · <b>名额上限</b></div>
+            <div id="phCapsForm"></div>
+            <div id="phCapsMsg"></div>
+            <p class="note">三个上限同时查。staff 不占名额;暂停保留名额,封禁释放名额。调低不踢人,只停新增。</p>
+          </div>
+        </div>
+        <div class="card" data-style="margin-top:12px">
+          <div class="eyebrow">cohort quotas · <b>两档额度</b>(只作用于 free 档;pro / developer 不受影响)</div>
+          <div class="tablebox"><table id="phQuotas"></table></div>
+          <div id="phQuotasMsg"></div>
+        </div>
+        <div class="section grid g2" data-style="margin-top:12px;margin-bottom:0">
+          <div class="card">
+            <div class="eyebrow">site budget · <b>全站月预算</b></div>
+            <div id="phBudgetForm"></div>
+            <div id="phBudgetMsg"></div>
+            <p class="note">到告警比例给告警邮箱发一封;到停止比例暂停新增名额与自动放行;任何一次请求会突破全站上限就在调用前拒绝。</p>
+          </div>
+          <div class="card">
+            <div class="eyebrow">release · <b>放行</b></div>
+            <div id="phReleaseForm"></div>
+            <div id="phReleaseMsg"></div>
+            <p class="note">按入队先后放;每一批都重查开关、容量和预算,所以实际放出的人数可能比每批少。</p>
+          </div>
+        </div>
+        <div class="card" data-style="margin-top:12px">
+          <div class="eyebrow">staff · <b>staff 名单</b>(不占名额,花费计入 staff 池)</div>
+          <div class="tablebox"><table id="phStaff"></table></div>
+          <div class="row" data-style="margin-top:10px">
+            <input id="phStaffEmail" type="email" placeholder="someone@example.com" autocomplete="off" data-style="max-width:320px;margin-bottom:0">
+            <button class="btn quiet" data-click="phStaffAdd">加入 staff</button>
+          </div>
+          <div id="phStaffMsg"></div>
+        </div>
+        <div class="card" data-style="margin-top:12px">
+          <div class="eyebrow">phase audit · <b>开放阶段留痕(最近 10 条)</b></div>
+          <div class="tablebox"><table id="phAudit"></table></div>
+        </div>
+      </div>
+    </div>
+
     <div class="section grid g2">
       <div class="card">
         <div class="eyebrow">features · <b>30 天功能使用</b></div>

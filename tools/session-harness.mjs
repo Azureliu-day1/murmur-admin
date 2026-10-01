@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { createFake } from "./beta-phases-fake.mjs";
 
 // SEC-M8(2026-10-08):脚本搬进了 admin.js(CSP 不放 unsafe-inline)。页面引用了外链脚本就读那份;
 //   还是内联的旧页面照旧抽 <script> 块。
@@ -288,7 +289,8 @@ async function cfgWorld(routes, opt = {}) {
     if (path === "/admin/access-requests" && !routes[path]) return Promise.resolve(res(200, { requests: [], counts: {} }));
     const h = routes[path];
     if (!h) return Promise.resolve(res(404, { error: { message: "no route" } }));
-    const [code, body] = h(init.body ? JSON.parse(init.body) : null);
+    const lower = {}; Object.keys(hdr).forEach(k => { lower[k.toLowerCase()] = String(hdr[k]); });
+    const [code, body] = h(init.body ? JSON.parse(init.body) : null, lower);
     return Promise.resolve(res(code, body));
   }
   const cons = { log: (...a) => out.push(a.join(" ")), error: (...a) => out.push(a.join(" ")),
@@ -342,6 +344,21 @@ function deepHas(root, needle) {
 const domHas = (w, needle) => [...w.els.values()].some(e =>
   [e.value, e.innerHTML, e.textContent].some(x => typeof x === "string" && x.includes(needle)));
 const hidden = (w, id) => w.$(id)._cls.has("hidden");
+
+// 开放阶段:同一个假世界,/admin/action 与 challenge 交给 tools/beta-phases-fake.mjs
+async function phWorld(scene, tweak) {
+  const fake = createFake(scene);
+  if (tweak) tweak(fake);
+  const wrap = (m, p) => (b, h) => {
+    const out = fake.route(m, p, b, h || {});
+    if (p === "/admin/action" && b && b.action === "access_get" && fake.view_limits && out[0] === 200) out[1].limits = fake.view_limits;
+    return out;
+  };
+  const w = await cfgWorld({ "/admin/config/challenge": wrap("POST", "/admin/config/challenge"), "/admin/action": wrap("POST", "/admin/action"),
+                             "/admin/access-requests": wrap("GET", "/admin/access-requests"), "/admin/config": () => [403, { error: { message: "x" } }] });
+  w.fake = fake;
+  return w;
+}
 
 const CFG_CASES = [
   ["g) 非管理员:/admin/config 回 403 —— 配置块整块不出现", async () => {
@@ -815,6 +832,119 @@ const CFG_CASES = [
     r.push([tbl().includes("这一类没有申请"), "空的一类有一句话,不是空表"]);
     r.push([!(HTML + CODE).includes("解回"), "「解回 active / 解回来」的过时说法全文没了(实际:拒绝且不改状态)"]);
     r.push([CODE.includes("querySelectorAll(\".tab[data-f]\")"), "用户表那排 tab 的绑定只认 data-f,不会摘掉申请栏的选中态"]);
+    return r;
+  }],
+
+  // ── 2026-10-01 内测 → 公测:开放阶段页(A2)。假服务 = tools/beta-phases-fake.mjs(和截图同一份),
+  //    它自己核确认码:一次性、绑「动作 + 参数」—— 页面拿码时没把动作 / 参数送对,写就 403。
+  ["y) 开放阶段 · 读:顶部一行现状、五块表单按服务端的值填好,不改就不能「应用」;403 整块藏、旧服务端说人话", async () => {
+    const w = await phWorld("closed");
+    const sum = w.$("phSummary").innerHTML, r = [];
+    r.push([!hidden(w, "phSec") && !hidden(w, "phBody"), "开放阶段这一块出现了"]);
+    r.push([sum.includes("内测") && sum.includes("4 / 20") && sum.includes("0 / 100") && sum.includes("4 / 120"), "现状:内测 4/20 · 公测 0/100 · 总 4/120"]);
+    r.push([sum.includes("$8.00 / $60.00") && sum.includes("13%") && sum.includes("bar-fill"), "本月预算用量条:$8.00 / $60.00 · 13%"]);
+    r.push([w.$("phPhase").innerHTML.includes("转为公测") && w.$("phPhase").innerHTML.includes("暂停受理"), "阶段卡:「转为公测」+「暂停受理」"]);
+    r.push([w.$("phIn_public_cap").value === "100" && w.$("phIn_site_budget_micro_usd").value === "60" && w.$("phIn_budget_alert_ratio").value === "0.7" && w.$("phIn_auto_release").value === "0", "表单按服务端的值填好(钱按美元显示)"]);
+    r.push([w.$("phQ_public_weekly_chars").value === "2000" && w.$("phQ_closed_lecture_trial_seconds").value === "180", "两档额度表填好"]);
+    r.push([w.$("phStaff").innerHTML.includes("staff@example.com"), "staff 名单列出来"]);
+    r.push([["caps", "budget", "release"].every(f => w.$("ph_" + f + "_apply").disabled === true) && w.$("phQ_public_apply").disabled === true, "什么都没改 → 四个「应用」全灰"]);
+    r.push([w.fake.log.filter(x => x.action && x.action !== "access_get").length === 0 && w.reqs.every(x => x.path !== "/admin/config/challenge"), "读的时候一发写、一个确认码都没要"]);
+    const w2 = await cfgWorld({ "/admin/action": () => [403, { error: { message: "forbidden", code: "not_admin" } }] });
+    r.push([hidden(w2, "phSec"), "access_get 回 403 → 整块不出现"]);
+    const w3 = await cfgWorld({ "/admin/action": () => [400, { error: { message: "不认识的操作", from: "murmur" } }] });
+    r.push([!hidden(w3, "phSec") && hidden(w3, "phBody") && w3.$("phNone").innerHTML.includes("还没有「开放阶段」接口"), "服务端还没上线(不认识的操作)→ 说一句人话,不画空表单"]);
+    return r;
+  }],
+  ["z) 开放阶段 · 越界页面直接拦:红字写范围、「应用」变灰、硬点也一发不出;服务端给 limits 就用服务端的", async () => {
+    const w = await phWorld("closed"), r = [];
+    const trial = async (form, k, v, want) => {
+      w.$("phIn_" + k).value = v; await w.call("phCheck", form);
+      const red = w.$("phIn_" + k + "_msg").innerHTML.includes(want) && w.$("ph_" + form + "_apply").disabled === true;
+      const n0 = w.reqs.length; await w.call("phApply", form);
+      const none = w.reqs.slice(n0).every(x => x.path !== "/admin/config/challenge" && !(x.path === "/admin/action" && x.body && x.body.includes("access_set")));
+      r.push([red && none && w.$(form === "caps" ? "phCapsMsg" : form === "budget" ? "phBudgetMsg" : "phReleaseMsg").innerHTML.includes("没提交"),
+              k + " = " + JSON.stringify(v) + " → 红字含「" + want + "」、灰、硬点不发"]);
+      w.$("phIn_" + k).value = String(k === "release_batch" ? 10 : k === "public_cap" ? 100 : k === "site_budget_micro_usd" ? 60 : 0.7);
+      await w.call("phCheck", form);
+    };
+    await trial("caps", "public_cap", "-1", "0–100000");
+    await trial("caps", "public_cap", "100001", "0–100000");
+    await trial("caps", "public_cap", "1.5", "要整数");
+    await trial("caps", "public_cap", "", "不能空着");
+    await trial("budget", "site_budget_micro_usd", "abc", "要一个数字");
+    await trial("budget", "site_budget_micro_usd", "10001", "$0–10000");
+    await trial("budget", "budget_alert_ratio", "1.2", "0.05–1");
+    await trial("release", "release_batch", "0", "1–500");
+    w.$("phIn_budget_alert_ratio").value = "0.9"; await w.call("phCheck", "budget");
+    r.push([w.$("ph_budget_diff").innerHTML.includes("告警比例要小于停止比例") && w.$("ph_budget_apply").disabled === true, "告警 0.9 ≥ 停止 0.85 → 跨格红字、灰"]);
+    w.$("phIn_budget_alert_ratio").value = "0.7"; await w.call("phCheck", "budget");
+    w.$("phIn_public_cap").value = "100000"; await w.call("phCheck", "caps");
+    r.push([w.$("phIn_public_cap_msg").innerHTML === "" && w.$("ph_caps_apply").disabled === false, "边界 100000 → 放行、可点"]);
+    w.$("phQ_public_weekly_chars").value = "-5"; await w.call("phQCheck", "public");
+    const n0 = w.reqs.length; await w.call("phQApply", "public");
+    r.push([w.$("phQ_public_weekly_chars_msg").innerHTML.includes("0–1000000") && w.$("phQ_public_apply").disabled === true &&
+            w.reqs.length === n0, "两档额度越界也拦,一发不出"]);
+    const wl = await phWorld("closed", f => { f.view_limits = { public_cap: [0, 500] }; });
+    wl.$("phIn_public_cap").value = "600"; await wl.call("phCheck", "caps");
+    r.push([wl.$("phIn_public_cap_msg").innerHTML.includes("0–500") && wl.$("ph_caps_apply").disabled === true, "服务端 limits {public_cap:[0,500]} → 600 被拦,红字写 0–500"]);
+    return r;
+  }],
+  ["aa) 开放阶段 · 改前 → 改后 + 影响 → 取消不发 / 确认拿码再写 → 重拉、留痕出现", async () => {
+    const w = await phWorld("public"), r = [];
+    w.$("phIn_public_cap").value = "300"; await w.call("phCheck", "caps");
+    const d = w.$("ph_caps_diff").innerHTML;
+    r.push([d.includes("公测上限 100 → 300"), "先摆「改前 → 改后」:公测上限 100 → 300"]);
+    r.push([d.includes("候补里前 20 人可以放行") && d.includes("下一批放 10 人"), "影响一句:候补里前 20 人可以放行,下一批放 10 人"]);
+    r.push([w.$("ph_caps_apply").disabled === false, "「应用」亮了"]);
+    w.st.confirm = false;
+    let n0 = w.reqs.length; await w.call("phApply", "caps");
+    r.push([w.confirms.length === 1 && w.confirms[0].includes("公测上限 100 → 300") && w.confirms[0].includes("候补里前 20 人"), "确认框里再摆一遍改动和影响"]);
+    r.push([w.reqs.slice(n0).length === 0 && w.fake.state.settings.public_cap === 100, "取消 → 不拿码、不写,服务端值没动"]);
+    w.st.confirm = true;
+    n0 = w.reqs.length; await w.call("phApply", "caps");
+    const seq = w.reqs.slice(n0).map(x => x.path + (x.body && x.body.includes('"action"') ? ":" + JSON.parse(x.body).action : ""));
+    r.push([seq[0] === "/admin/config/challenge:access_set" && seq[1] === "/admin/action:access_set" && seq.includes("/admin/action:access_get"), "顺序:拿码(带动作)→ 写 → 重拉 access_get"]);
+    const ch = JSON.parse(w.reqs[n0].body), wr = w.reqs[n0 + 1];
+    r.push([JSON.stringify(ch.params) === JSON.stringify({ patch: { public_cap: 300 } }) && JSON.parse(wr.body).patch.public_cap === 300 && !!wr.confirm, "拿码送 {action, params};写只送局部补丁 {public_cap:300} + x-admin-confirm"]);
+    r.push([w.fake.state.settings.public_cap === 300 && w.fake.log.some(x => x.action === "access_set" && x.status === 200), "假服务核过码(一次性、绑动作 + 参数)并写进去了"]);
+    r.push([w.$("phCapsMsg").innerHTML.includes("已生效") && w.$("phSummary").innerHTML.includes("100 / 300"), "说「已生效」,顶部现状变成 100 / 300"]);
+    r.push([w.$("phAudit").innerHTML.includes("公测上限 100 → 300") && w.$("phAudit").innerHTML.includes("改设置"), "留痕表出现这一条"]);
+    // 码被别人用掉 / 过期:服务端 403,页面说人话、不假装成功
+    w.fake.nonces.clear();
+    const orig = w.fake.route;
+    w.fake.route = (m, p, b, h) => p === "/admin/config/challenge" ? [200, { nonce: "0".repeat(64) }] : orig(m, p, b, h);
+    w.$("phIn_public_cap").value = "250"; await w.call("phCheck", "caps"); await w.call("phApply", "caps");
+    w.fake.route = orig;
+    r.push([w.$("phCapsMsg").innerHTML.includes("确认码无效") && w.fake.state.settings.public_cap === 300, "码无效 → 403 → 「确认码无效……什么都没改」,值没动"]);
+    return r;
+  }],
+  ["ab) 开放阶段 · 转为公测 / 暂停受理 / 放行一批 / 两档额度 / staff 加移:每个写都先摆影响、各拿一个码", async () => {
+    const w = await phWorld("closed"), r = [];
+    await w.call("phSetPhase", "public");
+    r.push([w.confirms.at(-1).includes("阶段 内测 → 公测") && w.confirms.at(-1).includes("不碰注册开关") && w.confirms.at(-1).includes("满了进候补"), "转为公测:确认框写明改动 + 影响(不碰注册开关)"]);
+    r.push([w.fake.state.settings.phase === "public" && w.$("phPhase").innerHTML.includes("切回内测") && w.$("phSummary").innerHTML.includes("公测"), "切过去了,按钮变「切回内测」"]);
+    await w.call("phSetAccepting", false);
+    r.push([w.fake.state.settings.accepting === false && w.$("phSummary").innerHTML.includes("暂停受理") && w.confirms.at(-1).includes("不开座、不进候补"), "暂停受理:写进去,顶部挂「暂停受理」"]);
+    await w.call("phRelease");
+    r.push([w.$("phReleaseMsg").innerHTML.includes("候补是空的") && !w.fake.log.some(x => x.action === "waitlist_release"), "候补空着 → 不发放行"]);
+    w.$("phQ_public_weekly_chars").value = "3000"; await w.call("phQCheck", "public");
+    r.push([w.$("phQ_public_diff").innerHTML.includes("公测 · 每周字数 2000 → 3000") && w.$("phQ_public_diff").innerHTML.includes("pro / developer 不受影响"), "两档额度:改前 → 改后 + 只作用于 free"]);
+    await w.call("phQApply", "public");
+    r.push([w.fake.state.quotas["public"].weekly_chars === 3000 && w.fake.state.quotas.closed.weekly_chars === 2000, "只改了公测那一档"]);
+    w.$("phStaffEmail").value = "new.staff@example.com"; await w.call("phStaffAdd");
+    r.push([w.fake.state.staff.some(x => x.email === "new.staff@example.com") && w.$("phStaffEmail").value === "" && w.confirms.at(-1).includes("不占名额"), "加 staff:写进去、输入框清空"]);
+    await w.call("phStaffRemove", w.fake.state.staff[0].user_id);
+    r.push([!w.fake.state.staff.some(x => x.email === "staff@example.com"), "移出 staff:按 user_id 移掉"]);
+    const writes = w.fake.log.filter(x => x.path === "/admin/action" && x.action !== "access_get");
+    r.push([writes.length === 5 && writes.every(x => x.status === 200 && x.confirm) && new Set(writes.map(x => x.confirm)).size === 5, "五个写各带一个不同的码,全部被假服务核过(200)"]);
+    r.push([w.$("phAudit").innerHTML.split("<tr>").length - 2 === 5, "留痕表 5 条(最近 10 条以内全列)"]);
+    const wf = await phWorld("public");                    // 公测 100/100 满着
+    await wf.call("phRelease");
+    r.push([wf.fake.state.counts.waitlisted === 20 && wf.$("phReleaseMsg").innerHTML.includes("放出 0 人") && wf.$("phReleaseMsg").innerHTML.includes("受名额"), "公测满着 → 放行一批照实说「放出 0 人(受名额……)」,不假装放了"]);
+    const wp = await phWorld("public", f => { f.state.settings.public_cap = 300; });
+    await wp.call("phRelease");
+    r.push([wp.confirms.at(-1).includes("放最多 10 人") && wp.fake.state.counts.waitlisted === 10 && wp.$("phReleaseMsg").innerHTML.includes("放出 10 人") &&
+            wp.$("phSummary").innerHTML.includes("110 / 300"), "公测有空位 + 有候补 → 放行一批:按每批 10 放出 10 人,现状跟着变"]);
     return r;
   }],
 ];

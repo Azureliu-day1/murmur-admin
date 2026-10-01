@@ -207,6 +207,7 @@ function load() {
   // 整页慢也不该让「有人在等回音」这件事跟着晚到。
   loadAccess();
   loadConfig();          // 配置块同理:自己一条路由,并行拉,挂了不拖整页
+  phLoad();              // 开放阶段同理(access_get)
   apiFetch(API + "/admin/stats")
     .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
     .then(function (res) {
@@ -246,6 +247,7 @@ function render() {
   renderInvites(d.invites || []);
   renderProbe(d.invite_attempts);
   if (CONFIG) renderCfgAudit();   // 配置改动的留痕可能是从 stats 这份里筛的,stats 后到时补画
+  if (PH) phRenderAudit();        // 开放阶段留痕同理(access_get 没带 audit 时从 stats 里筛)
 }
 
 // ── 异常信号 ──────────────────────────────────────
@@ -2198,6 +2200,520 @@ function rcPreview() {
     .catch(function (e) { $("rcPreviewBtn").disabled = false; cfgMsg("rcPreview", "err", "预览没打出去:" + esc(e.message)); });
 }
 
+// ════════════════════════════════════════════════════════════════════
+// 开放阶段(2026-10-01,设计稿 murmur-all docs/DESIGN-beta-phases.md v0.2「后台开放阶段页」+「接口契约」)
+//   契约定了动作名:access_get、access_set(nonce,局部补丁)、waitlist_release(nonce,n)、staff_add / staff_remove(nonce);
+//   服务端施工路线另有 cohort_quotas_set。全部走现有的 POST /admin/action {action, …}。
+//   ⚠️ 回包形状契约没写死,下面是本页假定的 —— 对齐时只改 phNorm 一处 + phPost 的请求体:
+//     access_get → {settings{phase, closed_cap, public_cap, total_cap, accepting, auto_release, release_batch, release_daily_max,
+//                            site_budget_micro_usd, staff_budget_micro_usd, budget_alert_ratio, budget_stop_ratio, updated_at, updated_by},
+//                   counts{closed, public, staff, waitlisted, pending, released_today},
+//                   budget{month, site{reserved_micro_usd, spent_micro_usd}, staff{同上}},
+//                   quotas[{cohort, weekly_chars, monthly_cost_cap_micro_usd, ime_cloud_daily, lecture_trial_seconds}],
+//                   staff[{user_id, email, added_at, added_by}],
+//                   audit[开放阶段类留痕,新的在前](可缺:缺了从 /admin/stats 的 audit 里按动作名筛),
+//                   limits{键: [min, max] 或 {min, max},钱是微美元}(可缺:缺了用 PH_FIELDS 里的页面范围)}
+//     写:access_set {patch} · cohort_quotas_set {cohort, patch} · waitlist_release {n} · staff_add {email} · staff_remove {user_id}
+//   确认码:沿用 POST /admin/config/challenge → 请求头 x-admin-confirm。服务端要把码绑「操作者 + 动作 + 参数」,
+//     所以拿码时把 {action, params} 一起送上(现有 challenge 不读请求体,多送无害)。
+// 三条规矩写在代码里(哨兵 tools/session-harness.mjs y–ab):
+//   ① 越界 / 不是数字 / 告警 ≥ 停止 → 红字写范围、「应用」变灰,phApply 自己再核一次,一发请求都不出;
+//   ② 每个写先在页面上摆「改前 → 改后」+ 影响一句,confirm 里再摆一遍;取消 = 不拿码、不写;
+//   ③ 每个写都是「先拿一次性码、再写」,写完重拉 access_get,留痕表跟着刷新。
+// ════════════════════════════════════════════════════════════════════
+var PH = null;
+// 键 → [名字, 类型, 页面下限, 页面上限](钱的上下限是微美元;服务端回 limits 就用服务端的)
+var PH_FIELDS = {
+  closed_cap: ["内测上限", "int", 0, 100000],
+  public_cap: ["公测上限", "int", 0, 100000],
+  total_cap: ["普通用户总上限", "int", 0, 100000],
+  site_budget_micro_usd: ["普通用户池(美元 / 月)", "usd", 0, 10000e6],
+  staff_budget_micro_usd: ["staff 池(美元 / 月)", "usd", 0, 10000e6],
+  budget_alert_ratio: ["告警比例", "ratio", 0.05, 1],
+  budget_stop_ratio: ["停止比例", "ratio", 0.05, 1],
+  auto_release: ["自动放行", "bool"],
+  release_batch: ["每批人数", "int", 1, 500],
+  release_daily_max: ["每天上限", "int", 1, 5000],
+  weekly_chars: ["每周字数", "int", 0, 1000000],
+  monthly_cost_cap_micro_usd: ["月成本帽(美元)", "usd", 0, 1000e6],
+  ime_cloud_daily: ["云候选每天次数", "int", 0, 100000],
+  lecture_trial_seconds: ["代付长录音(秒)", "int", 0, 36000]
+};
+var PH_FORMS = {
+  caps: ["closed_cap", "public_cap", "total_cap"],
+  budget: ["site_budget_micro_usd", "staff_budget_micro_usd", "budget_alert_ratio", "budget_stop_ratio"],
+  release: ["auto_release", "release_batch", "release_daily_max"]
+};
+var PH_FORM_HOST = { caps: "phCapsForm", budget: "phBudgetForm", release: "phReleaseForm" };
+var PH_FORM_MSG = { caps: "phCapsMsg", budget: "phBudgetMsg", release: "phReleaseMsg" };
+var PH_QKEYS = ["weekly_chars", "monthly_cost_cap_micro_usd", "ime_cloud_daily", "lecture_trial_seconds"];
+var PH_COHORTS = [["closed", "内测"], ["public", "公测"]];
+var PH_AUDIT_RE = /^(access_set|cohort_quotas_set|waitlist_release|staff_add|staff_remove|access_phase|phase\.)/;
+var PH_ACTION_NAME = { access_set: "改设置", cohort_quotas_set: "改额度", waitlist_release: "放行一批", staff_add: "加 staff", staff_remove: "移出 staff" };
+
+function phCur() { return (PH && PH.settings) || {}; }
+function phCounts() { return (PH && PH.counts) || {}; }
+function phN(x) { return Number(x || 0); }
+function phPhaseName(p) { return p === "public" ? "公测" : "内测"; }
+function phPct(r) { return r == null ? "—" : Math.round(r * 100) + "%"; }
+
+// ── 回包 → 页面用的形状(契约对齐只改这里)──────────────
+function phNorm(j) {
+  var s = j.settings || j.access || {};
+  var out = { settings: {}, counts: j.counts || {}, budget: j.budget || {}, quotas: {},
+              staff: Array.isArray(j.staff) ? j.staff : [], audit: Array.isArray(j.audit) ? j.audit : null,
+              limits: j.limits || {} };
+  Object.keys(s).forEach(function (k) {
+    var f = PH_FIELDS[k], v = s[k];
+    if (f && f[1] === "bool") v = v === true || v === "true";
+    else if (f && v != null && v !== "") v = Number(v);
+    out.settings[k] = v;
+  });
+  out.settings.phase = s.phase === "public" ? "public" : "closed";
+  out.settings.accepting = !(s.accepting === false || s.accepting === "false");
+  var qs = j.quotas || j.cohort_quotas || [];
+  if (!Array.isArray(qs)) qs = Object.keys(qs).map(function (k) { var r = qs[k] || {}; r.cohort = r.cohort || k; return r; });
+  qs.forEach(function (q) {
+    var r = {};
+    PH_QKEYS.forEach(function (k) { r[k] = q[k] == null ? null : Number(q[k]); });
+    out.quotas[q.cohort] = r;
+  });
+  return out;
+}
+
+// ── 数值:范围 / 显示 / 解析 ─────────────────────────────
+function phRange(k) {
+  var f = PH_FIELDS[k], m = ((PH && PH.limits) || {})[k];
+  if (Array.isArray(m) && m.length === 2 && isFinite(Number(m[0])) && isFinite(Number(m[1]))) return { min: Number(m[0]), max: Number(m[1]) };
+  if (m && typeof m === "object" && isFinite(Number(m.min)) && isFinite(Number(m.max))) return { min: Number(m.min), max: Number(m.max) };
+  return { min: f[2], max: f[3] };
+}
+function phRangeText(k) {
+  var t = PH_FIELDS[k][1], rg = phRange(k);
+  if (t === "bool") return "";
+  return t === "usd" ? "$" + rg.min / 1e6 + "–" + rg.max / 1e6 : rg.min + "–" + rg.max;
+}
+function phFmt(k, v) {
+  var t = PH_FIELDS[k] ? PH_FIELDS[k][1] : k === "accepting" ? "bool" : "";
+  if (v == null || v === "") return "—";
+  if (k === "phase") return phPhaseName(v);
+  if (t === "bool") return v ? "开" : "关";
+  if (t === "usd") return "$" + (Number(v) / 1e6).toFixed(2);
+  if (t === "ratio") return phPct(Number(v));
+  return String(v);
+}
+function phToInput(k, v) {
+  var t = PH_FIELDS[k][1];
+  if (t === "bool") return v ? "1" : "0";
+  if (v == null || v === "") return "";
+  return t === "usd" ? String(Number(v) / 1e6) : String(v);
+}
+// 输入框 → 存储值:{v} 或 {err}
+function phParse(k, raw) {
+  var t = PH_FIELDS[k][1], rg = phRange(k);
+  raw = String(raw == null ? "" : raw).trim();
+  if (t === "bool") return { v: raw === "1" };
+  if (raw === "") return { err: "不能空着(" + phRangeText(k) + ")" };
+  var n = Number(raw);
+  if (!isFinite(n)) return { err: "要一个数字(" + phRangeText(k) + ")" };
+  var v = t === "usd" ? Math.round(n * 1e6) : n;
+  if (t === "int" && Math.floor(v) !== v) return { err: "要整数(" + phRangeText(k) + ")" };
+  if (v < rg.min || v > rg.max) return { err: "要在 " + phRangeText(k) + " 之间(现在 " + raw + ")" };
+  return { v: v };
+}
+
+// ── 全站月预算用量 ───────────────────────────────────────
+function phBudgetUse(pool, s) {
+  s = s || phCur();
+  var b = ((PH && PH.budget) || {})[pool] || {};
+  var used = phN(b.spent_micro_usd) + phN(b.reserved_micro_usd);
+  var cap = s[pool === "site" ? "site_budget_micro_usd" : "staff_budget_micro_usd"];
+  return { used: used, reserved: phN(b.reserved_micro_usd), cap: cap, ratio: cap > 0 ? used / cap : null };
+}
+function phBar(u, s) {
+  s = s || phCur();
+  if (u.ratio == null) return "";
+  var cls = u.ratio >= s.budget_stop_ratio ? " over" : u.ratio >= s.budget_alert_ratio ? " hot" : "";
+  return '<span class="bar-track"><span class="bar-fill' + cls + '" data-style="display:block;width:' +
+    Math.min(100, Math.round(u.ratio * 100)) + '%"></span></span>';
+}
+
+// ── 影响一句:按「改后」的设置 + 当前计数推 ────────────────
+function phImpact(patch) {
+  var cur = phCur(), c = phCounts(), S = {}, out = [];
+  Object.keys(cur).forEach(function (k) { S[k] = cur[k]; });
+  Object.keys(patch).forEach(function (k) { S[k] = patch[k]; });
+  var nC = phN(c.closed), nP = phN(c["public"]), nW = phN(c.waitlisted);
+  function room(s) {                                  // 当前阶段还能进几个(三个上限同时查)
+    var phaseRoom = s.phase === "public" ? s.public_cap - nP : s.closed_cap - nC;
+    return Math.max(0, Math.min(phaseRoom, s.total_cap - nC - nP));
+  }
+  function releaseRule(s) { return "每批 ≤ " + s.release_batch + " 人、每天 ≤ " + s.release_daily_max + " 人"; }
+
+  if ("phase" in patch) {
+    if (patch.phase === "public") {
+      out.push("新申请未满就当场开座(公测还能进 " + room(S) + " 人),满了进候补");
+      out.push("候补 " + nW + " 人" + (S.auto_release ? "会按" + releaseRule(S) + "自动放出" : ",自动放行关着,不会自动放出"));
+      out.push("内测用户保留原身份与额度;不碰注册开关");
+      if (!S.accepting) out.push("但现在暂停受理中,新申请仍然只记不开");
+    } else {
+      out.push("停止自动开座,已开的 " + nP + " 个公测名额不收回;新申请回到你手动审批");
+    }
+  }
+  if ("accepting" in patch) {
+    out.push(patch.accepting ? "恢复后按「" + phPhaseName(S.phase) + "」规则处理新申请"
+                             : "新申请照记,但回「暂停受理」:不开座、不进候补;已在候补的 " + nW + " 人不动");
+  }
+  var capKeys = ["closed_cap", "public_cap", "total_cap"].filter(function (k) { return k in patch; });
+  capKeys.forEach(function (k) {
+    var used = k === "closed_cap" ? nC : k === "public_cap" ? nP : nC + nP;
+    if (patch[k] < used) out.push(PH_FIELDS[k][0] + "低于已开的 " + used + " 人:不踢人,只停新增");
+  });
+  if (capKeys.length) {
+    var before = room(cur), after = room(S);
+    if (S.phase === "public") {
+      var k2 = Math.min(after, nW);
+      if (after > before && k2 > 0) {
+        out.push("候补里前 " + k2 + " 人可以放行" + (S.auto_release ? ",下一批放 " + Math.min(k2, S.release_batch) + " 人"
+                                                                : "(自动放行关着,要你点「放行一批」)"));
+      } else {
+        out.push("公测阶段还能进 " + before + " → " + after + " 人");
+      }
+    } else {
+      out.push("内测阶段还能手动开 " + before + " → " + after + " 个" +
+               ("public_cap" in patch ? ";公测上限要转为公测后才起作用" : ""));
+    }
+  }
+  if (["site_budget_micro_usd", "staff_budget_micro_usd", "budget_alert_ratio", "budget_stop_ratio"].some(function (k) { return k in patch; })) {
+    [["site", "普通用户池"], ["staff", "staff 池"]].forEach(function (p) {
+      var u = phBudgetUse(p[0], S);
+      if (u.ratio == null) return;
+      out.push(p[1] + "本月已用 " + phPct(u.ratio) +
+               (u.ratio >= S.budget_stop_ratio ? (p[0] === "site" ? ",已到停止线:新增名额与自动放行会暂停" : ",已到停止线")
+                : u.ratio >= S.budget_alert_ratio ? ",已过告警线(会发告警信)" : ""));
+    });
+  }
+  if ("auto_release" in patch) {
+    out.push(patch.auto_release ? "候补 " + nW + " 人会按" + releaseRule(S) + "自动放出(每批重查容量和预算)"
+                                : "候补不再自动放出;「放行一批」仍可手动");
+  } else if ("release_batch" in patch || "release_daily_max" in patch) {
+    out.push("放行改为" + releaseRule(S) + (S.auto_release ? "" : "(自动放行关着,只影响手动「放行一批」)"));
+  }
+  return out.length ? out.join(";") : "没有别的影响";
+}
+
+// ── 读 ───────────────────────────────────────────────────
+function phLoad() {
+  return apiFetch(API + "/admin/action", { method: "POST", body: JSON.stringify({ action: "access_get" }) })
+    .then(cfgJson)
+    .then(function (res) {
+      if (res.status === 401) return;                  // 交给 /admin/stats 那条路统一回登录页
+      if (res.status === 403) { PH = null; $("phSec").classList.add("hidden"); return; }
+      $("phSec").classList.remove("hidden");
+      if (!res.ok || !res.j || res.j.ok === false) {
+        PH = null;
+        $("phBody").classList.add("hidden");
+        var m = cfgErrText(res.j, res.status);
+        $("phNone").innerHTML = res.status === 400 && /不认识/.test(m)
+          ? '<p class="muted">服务端还没有「开放阶段」接口(access_get 回「不认识的操作」)—— 服务端上线后这一块自动出现。</p>'
+          : '<p class="err">开放阶段没读出来:' + esc(m) + "</p>";
+        $("phNone").classList.remove("hidden");
+        return;
+      }
+      PH = phNorm(res.j);
+      $("phNone").classList.add("hidden");
+      $("phBody").classList.remove("hidden");
+      phRender();
+    })
+    .catch(function (e) {
+      $("phSec").classList.remove("hidden");
+      $("phBody").classList.add("hidden");
+      $("phNone").innerHTML = '<p class="err">开放阶段没读出来:' + esc(e.message) + "</p>";
+      $("phNone").classList.remove("hidden");
+    });
+}
+
+function phRender() {
+  var s = phCur();
+  $("phVer").textContent = s.updated_at ? "最后改动 " + when(s.updated_at) + (s.updated_by ? " · " + s.updated_by : "") : "";
+  phRenderSummary();
+  phRenderPhase();
+  Object.keys(PH_FORMS).forEach(phRenderForm);
+  phRenderQuotas();
+  phRenderStaff();
+  phRenderAudit();
+}
+
+function phRenderSummary() {
+  var s = phCur(), c = phCounts(), u = phBudgetUse("site");
+  function item(lbl, v) { return '<span><span class="muted">' + esc(lbl) + "</span> <b>" + v + "</b></span>"; }
+  function cap(n, m) { return esc(phN(n)) + " / " + esc(m == null ? "—" : m); }
+  $("phSummary").innerHTML = '<div class="row" data-style="gap:6px 18px">' +
+    '<span><span class="chip' + (s.phase === "public" ? " pro" : "") + '">' + esc(phPhaseName(s.phase)) + "</span>" +
+    (s.accepting ? "" : ' <span class="chip banned">暂停受理</span>') + "</span>" +
+    item("内测", cap(c.closed, s.closed_cap)) + item("公测", cap(c["public"], s.public_cap)) +
+    item("总", cap(phN(c.closed) + phN(c["public"]), s.total_cap)) +
+    item("staff", esc(phN(c.staff))) + item("候补", esc(phN(c.waitlisted))) + item("待审", esc(phN(c.pending))) +
+    '<span><span class="muted">本月预算</span> ' + phBar(u) + " <b>" + esc(usd(u.used)) + " / " + esc(u.cap == null ? "—" : usd(u.cap)) +
+    "</b> <span class=\"muted\">" + esc(phPct(u.ratio)) + "</span></span></div>";
+}
+
+function phRenderPhase() {
+  var s = phCur();
+  var how = !s.accepting ? "记下申请,回「暂停受理」,不开座、不进候补"
+    : s.phase === "public" ? "未满当场开座,满了进候补" : "进待审,你手动开";
+  $("phPhase").innerHTML =
+    '<div class="kv"><span class="k">现在</span><span class="v"><b>' + esc(phPhaseName(s.phase)) + "</b> · " +
+    (s.accepting ? "受理中" : "暂停受理") + "</span></div>" +
+    '<div class="kv"><span class="k">新申请怎么处理</span><span class="v">' + esc(how) + "</span></div>" +
+    '<div class="row" data-style="margin-top:10px">' +
+    (s.phase === "public" ? '<button class="btn quiet" id="phPhaseBtn"' + actAttr("click", "phSetPhase", ["closed"]) + '>切回内测</button>'
+                          : '<button class="btn" id="phPhaseBtn"' + actAttr("click", "phSetPhase", ["public"]) + '>转为公测</button>') +
+    ' <button class="btn quiet" id="phAcceptBtn"' + actAttr("click", "phSetAccepting", [!s.accepting]) + '>' +
+    (s.accepting ? "暂停受理" : "恢复受理") + "</button></div>";
+}
+
+function phRenderForm(form) {
+  var s = phCur();
+  var extra = "";
+  if (form === "budget") {
+    extra = [["site", "普通用户池"], ["staff", "staff 池"]].map(function (p) {
+      var u = phBudgetUse(p[0]);
+      return '<div class="kv"><span class="k">' + esc(p[1]) + "本月已用</span><span class=\"v\">" + phBar(u) + " " +
+        esc(usd(u.used)) + (u.reserved ? '<span class="muted">(其中预留 ' + esc(usd(u.reserved)) + ")</span>" : "") +
+        " / " + esc(u.cap == null ? "—" : usd(u.cap)) + " · " + esc(phPct(u.ratio)) + "</span></div>";
+    }).join("") + '<div data-style="height:10px"></div>';
+  }
+  if (form === "release") {
+    var c = phCounts();
+    extra = '<div class="kv"><span class="k">候补</span><span class="v">' + esc(phN(c.waitlisted)) + " 人" +
+      (c.released_today != null ? " · 今天已放 " + esc(phN(c.released_today)) + " 人" : "") + "</span></div>" +
+      '<div data-style="height:10px"></div>';
+  }
+  $(PH_FORM_HOST[form]).innerHTML = extra +
+    '<div class="cfg-form" data-style="margin-top:0;padding-top:0;border-top:none"><div class="two">' +
+    PH_FORMS[form].map(function (k) {
+      var f = PH_FIELDS[k], rt = phRangeText(k);
+      var input = f[1] === "bool"
+        ? '<select id="phIn_' + k + '"' + actAttr("change", "phCheck", [form]) + '><option value="1">开</option><option value="0">关</option></select>'
+        : '<input id="phIn_' + k + '" type="number" step="' + (f[1] === "int" ? "1" : "0.01") + '"' + actAttr("input", "phCheck", [form]) + '>';
+      return '<div><label for="phIn_' + k + '">' + esc(f[0]) + (rt ? ' <span class="mono">' + esc(rt) + "</span>" : "") + "</label>" +
+        input + '<div id="phIn_' + k + '_msg"></div></div>';
+    }).join("") + "</div>" +
+    '<div id="ph_' + form + '_diff"></div>' +
+    '<div class="row" data-style="margin-top:8px"><button class="btn" id="ph_' + form + '_apply" disabled' + actAttr("click", "phApply", [form]) + '>应用</button>' +
+    (form === "release" ? ' <button class="btn quiet" id="phReleaseBtn" data-click="phRelease">放行一批</button>' : "") + "</div></div>";
+  // 值用属性赋(不靠 innerHTML 里的 value=):真 DOM 与哨兵的假 DOM 走同一条路
+  PH_FORMS[form].forEach(function (k) { $("phIn_" + k).value = phToInput(k, s[k]); });
+  phCheck(form);
+}
+
+// 读一个表单:{patch, diff[], errs[](逐格), cross[](跨格)}
+function phFormRead(form) {
+  var cur = phCur(), patch = {}, diff = [], errs = [], cross = [];
+  PH_FORMS[form].forEach(function (k) {
+    var p = phParse(k, $("phIn_" + k).value);
+    if (p.err) { errs.push(PH_FIELDS[k][0] + ":" + p.err); return; }
+    if (p.v !== cur[k]) { patch[k] = p.v; diff.push(PH_FIELDS[k][0] + " " + phFmt(k, cur[k]) + " → " + phFmt(k, p.v)); }
+  });
+  if (form === "budget" && !errs.length) {
+    var a = "budget_alert_ratio" in patch ? patch.budget_alert_ratio : cur.budget_alert_ratio;
+    var st = "budget_stop_ratio" in patch ? patch.budget_stop_ratio : cur.budget_stop_ratio;
+    if (a != null && st != null && !(a < st)) cross.push("告警比例要小于停止比例(现在 " + phFmt("budget_alert_ratio", a) + " ≥ " + phFmt("budget_stop_ratio", st) + ")");
+  }
+  return { patch: patch, diff: diff, errs: errs, cross: cross };
+}
+
+// 越界 → 那一格下红字、「应用」变灰;改了 → 摆「改前 → 改后」+ 影响
+function phCheck(form) {
+  var r = phFormRead(form);
+  PH_FORMS[form].forEach(function (k) {
+    var p = phParse(k, $("phIn_" + k).value);
+    $("phIn_" + k + "_msg").innerHTML = p.err ? '<p class="err">' + esc(p.err) + ",不能应用。</p>" : "";
+  });
+  $("ph_" + form + "_diff").innerHTML = r.cross.length ? '<p class="err">' + esc(r.cross.join(";")) + ",不能应用。</p>"
+    : (!r.errs.length && r.diff.length) ? phDiffHTML(r.diff, phImpact(r.patch)) : "";
+  $("ph_" + form + "_apply").disabled = !!(r.errs.length || r.cross.length || !r.diff.length);
+  return r;
+}
+function phDiffHTML(diff, impact) {
+  return '<p class="note"><b>改前 → 改后</b>:' + esc(diff.join(";")) + "</p>" +
+         '<p class="note"><b>影响</b>:' + esc(impact) + "</p>";
+}
+function phMsg(id, cls, html) { $(id).innerHTML = '<p class="' + cls + '">' + html + "</p>"; }
+
+// ── 写 ───────────────────────────────────────────────────
+function phPost(action, params) {
+  var body = { action: action };
+  Object.keys(params).forEach(function (k) { body[k] = params[k]; });
+  return apiFetch(API + "/admin/config/challenge", { method: "POST", body: JSON.stringify({ action: action, params: params }) })
+    .then(cfgJson)
+    .then(function (res) {
+      var n = res.ok && res.j && res.j.nonce;
+      if (!n) throw new Error("没拿到确认码:" + cfgErrText(res.j, res.status));
+      return apiFetch(API + "/admin/action", { method: "POST", body: JSON.stringify(body),
+                                               headers: { "x-admin-confirm": String(n) } }).then(cfgJson);
+    });
+}
+function phErr(res) {
+  var j = res.j || {}, code = j.error && typeof j.error === "object" ? j.error.code : "";
+  if (code === "confirm_invalid" || code === "confirm_required") return "确认码无效、过期或已用过 —— 什么都没改,再点一次。";
+  if (res.status === 409 || code === "stale") return "设置刚被别处改过,什么都没改;已重拉,看一眼再改。";
+  return "没生效:" + cfgErrText(j, res.status);
+}
+// 一次写:confirm 里再摆一遍「改前 → 改后」+ 影响 → 拿码 → 写 → 重拉
+function phWrite(msgId, action, params, diff, impact, okText) {
+  if (!confirm("确认这次改动?\n\n改前 → 改后:\n  " + diff.join("\n  ") + "\n\n影响:" + impact +
+               "\n\n确认后先拿一次性确认码再提交,改动写进留痕。")) return;
+  phMsg(msgId, "note", "提交中…");
+  return phPost(action, params).then(function (res) {
+    if (!cfgClean(res.j)) { phMsg(msgId, "err", "回包里疑似有密钥,已拒绝显示。"); return; }
+    if (!res.ok || (res.j && res.j.ok === false)) { phMsg(msgId, "err", esc(phErr(res))); phLoad(); return; }
+    phMsg(msgId, "okmsg", esc(okText ? okText(res.j || {}) : "已生效:" + diff.join(";")) + "。");
+    phLoad();
+    loadAccess();                                     // 放行 / 切阶段会改申请的状态
+  }).catch(function (e) { phMsg(msgId, "err", esc(e.message)); });
+}
+
+function phApply(form) {
+  var r = phCheck(form);
+  if (r.errs.length || r.cross.length) { phMsg(PH_FORM_MSG[form], "err", "没提交:" + esc(r.errs.concat(r.cross).join(";"))); return; }
+  if (!r.diff.length) { phMsg(PH_FORM_MSG[form], "note", "和现在一样,没什么可改的。"); return; }
+  return phWrite(PH_FORM_MSG[form], "access_set", { patch: r.patch }, r.diff, phImpact(r.patch));
+}
+function phSetPhase(to) {
+  var cur = phCur();
+  if (!PH || cur.phase === to) return;
+  return phWrite("phPhaseMsg", "access_set", { patch: { phase: to } },
+                 ["阶段 " + phPhaseName(cur.phase) + " → " + phPhaseName(to)], phImpact({ phase: to }));
+}
+function phSetAccepting(on) {
+  var cur = phCur();
+  if (!PH || cur.accepting === on) return;
+  return phWrite("phPhaseMsg", "access_set", { patch: { accepting: on } },
+                 ["受理新申请 " + (cur.accepting ? "开" : "关") + " → " + (on ? "开" : "关")], phImpact({ accepting: on }));
+}
+function phRelease() {
+  var s = phCur(), c = phCounts(), n = phN(s.release_batch);
+  if (!PH) return;
+  if (!(n >= 1)) { phMsg("phReleaseMsg", "err", "每批人数还没设,先设好再放。"); return; }
+  if (!phN(c.waitlisted)) { phMsg("phReleaseMsg", "note", "候补是空的,没什么可放。"); return; }
+  return phWrite("phReleaseMsg", "waitlist_release", { n: n },
+    ["放行一批:候补 " + phN(c.waitlisted) + " 人里按入队先后放最多 " + n + " 人"],
+    (c.released_today != null ? "今天已放 " + phN(c.released_today) + " / 每天上限 " + s.release_daily_max + ";" : "每天上限 " + s.release_daily_max + ";") +
+    "名额满或到预算停止线会少放或不放;放出的人收到「名额开好了」信",
+    function (j) { return j.released != null ? "放出 " + j.released + " 人" + (j.reason ? "(" + j.reason + ")" : "") : "放行已提交"; });
+}
+
+// ── 两档额度 ─────────────────────────────────────────────
+function phRenderQuotas() {
+  var q = (PH && PH.quotas) || {}, c = phCounts();
+  $("phQuotas").innerHTML = "<thead><tr><th>档</th>" +
+    PH_QKEYS.map(function (k) { return "<th>" + esc(PH_FIELDS[k][0]) + '<div class="cfg-when mono">' + esc(phRangeText(k)) + "</div></th>"; }).join("") +
+    "<th></th></tr></thead><tbody>" +
+    PH_COHORTS.map(function (co) {
+      if (!q[co[0]]) return "<tr><td>" + esc(co[1]) + '</td><td colspan="' + (PH_QKEYS.length + 1) + '" class="muted">服务端没回这一档。</td></tr>';
+      return "<tr><td>" + esc(co[1]) + '<div class="cfg-when">现 ' + esc(phN(c[co[0]])) + " 人</div></td>" +
+        PH_QKEYS.map(function (k) {
+          var id = "phQ_" + co[0] + "_" + k;
+          return '<td><input id="' + id + '" type="number" step="' + (PH_FIELDS[k][1] === "usd" ? "0.01" : "1") +
+            '" data-style="width:120px;margin-bottom:0"' + actAttr("input", "phQCheck", [co[0]]) + '><div id="' + id + '_msg"></div></td>';
+        }).join("") +
+        '<td><button class="btn" id="phQ_' + co[0] + '_apply" disabled' + actAttr("click", "phQApply", [co[0]]) + '>应用</button></td></tr>' +
+        '<tr><td colspan="' + (PH_QKEYS.length + 2) + '" id="phQ_' + co[0] + '_diff" data-style="border-bottom:none;padding-top:0"></td></tr>';
+    }).join("") + "</tbody>";
+  PH_COHORTS.forEach(function (co) {
+    if (!q[co[0]]) return;
+    PH_QKEYS.forEach(function (k) { $("phQ_" + co[0] + "_" + k).value = phToInput(k, q[co[0]][k]); });
+    phQCheck(co[0]);
+  });
+}
+function phQRead(co) {
+  var cur = ((PH && PH.quotas) || {})[co] || {}, patch = {}, diff = [], errs = [], name = co === "public" ? "公测" : "内测";
+  PH_QKEYS.forEach(function (k) {
+    var p = phParse(k, $("phQ_" + co + "_" + k).value);
+    if (p.err) { errs.push(PH_FIELDS[k][0] + ":" + p.err); return; }
+    if (p.v !== cur[k]) { patch[k] = p.v; diff.push(name + " · " + PH_FIELDS[k][0] + " " + phFmt(k, cur[k]) + " → " + phFmt(k, p.v)); }
+  });
+  return { patch: patch, diff: diff, errs: errs, name: name };
+}
+function phQImpact(co) {
+  return "只作用于 free 档的" + (co === "public" ? "公测" : "内测") + "用户(现 " + phN(phCounts()[co]) + " 人);pro / developer 不受影响";
+}
+function phQCheck(co) {
+  var r = phQRead(co);
+  PH_QKEYS.forEach(function (k) {
+    var p = phParse(k, $("phQ_" + co + "_" + k).value);
+    $("phQ_" + co + "_" + k + "_msg").innerHTML = p.err ? '<p class="err">' + esc(p.err) + ",不能应用。</p>" : "";
+  });
+  $("phQ_" + co + "_diff").innerHTML = (!r.errs.length && r.diff.length) ? phDiffHTML(r.diff, phQImpact(co)) : "";
+  $("phQ_" + co + "_apply").disabled = !!(r.errs.length || !r.diff.length);
+  return r;
+}
+function phQApply(co) {
+  var r = phQCheck(co);
+  if (r.errs.length) { phMsg("phQuotasMsg", "err", "没提交:" + esc(r.errs.join(";"))); return; }
+  if (!r.diff.length) { phMsg("phQuotasMsg", "note", "和现在一样,没什么可改的。"); return; }
+  return phWrite("phQuotasMsg", "cohort_quotas_set", { cohort: co, patch: r.patch }, r.diff, phQImpact(co));
+}
+
+// ── staff 名单 ───────────────────────────────────────────
+function phRenderStaff() {
+  var rows = (PH && PH.staff) || [];
+  if (!rows.length) {
+    $("phStaff").innerHTML = '<tbody><tr><td class="muted">staff 名单是空的。迁移不会自动加人 —— 开发者自己的账号要在这里加一次。</td></tr></tbody>';
+    return;
+  }
+  // ⚠️ onclick 里只放 user_id(uuid),不放邮箱:邮箱是人敲的,一个引号就能把属性撕开
+  $("phStaff").innerHTML = "<thead><tr><th>邮箱</th><th>加入</th><th class=\"mob-hide\">谁加的</th><th></th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      return '<tr><td class="mono">' + esc(r.email || r.user_id) + "</td><td>" + esc(when(r.added_at)) + "</td>" +
+        '<td class="mob-hide">' + esc(r.added_by || "—") + "</td>" +
+        '<td><button class="btn quiet"' + actAttr("click", "phStaffRemove", [argStr(r.user_id)]) + '>移出</button></td></tr>';
+    }).join("") + "</tbody>";
+}
+function phStaffAdd() {
+  var email = ($("phStaffEmail").value || "").trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { phMsg("phStaffMsg", "err", "填一个邮箱。"); return; }
+  if (!PH) return;
+  if ((PH.staff || []).some(function (r) { return String(r.email || "").toLowerCase() === email.toLowerCase(); })) {
+    phMsg("phStaffMsg", "note", "他已经在 staff 名单里了。"); return;
+  }
+  var p = phWrite("phStaffMsg", "staff_add", { email: email }, ["staff 名单 + " + email],
+                  "staff 不占名额;他的云端花费从此计入 staff 池,不占普通用户池");
+  if (p) p.then(function () { if (/okmsg/.test($("phStaffMsg").innerHTML)) $("phStaffEmail").value = ""; });
+  return p;
+}
+function phStaffRemove(uid) {
+  var r = ((PH && PH.staff) || []).filter(function (x) { return x.user_id === uid; })[0];
+  if (!r) { phMsg("phStaffMsg", "err", "这一行刚才不见了 —— 刷新一下。"); return; }
+  return phWrite("phStaffMsg", "staff_remove", { user_id: uid }, ["staff 名单 − " + (r.email || uid)],
+                 "移出后按普通用户口径:他若有名额,按自己的 cohort 占名额(超出上限也不踢人),花费回到普通用户池");
+}
+
+// ── 留痕:最近 10 条 ─────────────────────────────────────
+function phAuditRows() {
+  var rows = PH && PH.audit ? PH.audit
+    : ((DATA && DATA.audit) || []).filter(function (r) { return PH_AUDIT_RE.test(String(r.action || "")); });
+  return rows.slice(0, 10);
+}
+function phRenderAudit() {
+  var rows = phAuditRows();
+  if (!rows.length) { $("phAudit").innerHTML = '<tbody><tr><td class="muted">还没有开放阶段的改动。</td></tr></tbody>'; return; }
+  $("phAudit").innerHTML = "<thead><tr><th>时间</th><th class=\"mob-hide\">操作人</th><th>动作</th><th>变化</th><th class=\"mob-hide\">理由</th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      var b = r.before || {}, a = r.after || {}, chg = "";
+      try {
+        chg = typeof a === "object" ? Object.keys(a).map(function (k) {
+          return (PH_FIELDS[k] ? PH_FIELDS[k][0] : k === "phase" ? "阶段" : k === "accepting" ? "受理新申请" : k) + " " + (b[k] == null ? "—" : phFmt(k, b[k])) + " → " + phFmt(k, a[k]);
+        }).join(";") : String(a);
+      } catch (e) {}
+      return "<tr><td>" + esc(when(r.at || r.created_at)) + '</td><td class="mob-hide">' + esc(r.actor || r.actor_email || "—") + "</td>" +
+        "<td>" + esc(PH_ACTION_NAME[r.action] || r.action) + '<div class="cfg-when mono">' + esc(r.action) + "</div></td>" +
+        '<td class="cfg-diff">' + esc(chg || cfgBrief(r.target)) + '</td><td class="mob-hide">' + esc(r.reason || "—") + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
 
 // ── SEC-M8:CSP 去掉 unsafe-inline 之后的事件与内联样式(2026-10-08)────────────────────────
 // 页面上不再有 onclick= / oninput= / onchange= 与 style= 属性(CSP 会把它们全部挡掉)。
@@ -2210,7 +2726,7 @@ function argStr(s) { return s == null ? "" : String(s); }
 function actAttr(type, fn, args) {
   return ' data-' + type + '="' + fn + '"' + (args && args.length ? ' data-args="' + esc(JSON.stringify(args)) + '"' : "");
 }
-var ACTION_NAMES = ["accessAct", "accessFilterSet", "cfgDirty", "cfgKeyApply", "cfgKeyDirty", "cfgKeyProbe", "cfgPriceApply", "cfgProvApply", "cfgProvClose", "cfgProvEdit", "cfgProvProbe", "cfgRollback", "cfgTierApply", "cfgTierClose", "cfgTierEdit", "cfgTierProbe", "closeDrawer", "doAction", "grantSeat", "load", "logout", "mintInvite", "rcExtraShow", "rcNumCheck", "rcPreview", "rcPublish", "rcRollback", "rcSceneToggle", "rcStylesDirty", "reconcile", "revokeInvite", "toggleHash"];
+var ACTION_NAMES = ["accessAct", "accessFilterSet", "cfgDirty", "cfgKeyApply", "cfgKeyDirty", "cfgKeyProbe", "cfgPriceApply", "cfgProvApply", "cfgProvClose", "cfgProvEdit", "cfgProvProbe", "cfgRollback", "cfgTierApply", "cfgTierClose", "cfgTierEdit", "cfgTierProbe", "closeDrawer", "doAction", "grantSeat", "load", "logout", "mintInvite", "phApply", "phCheck", "phQApply", "phQCheck", "phRelease", "phSetAccepting", "phSetPhase", "phStaffAdd", "phStaffRemove", "rcExtraShow", "rcNumCheck", "rcPreview", "rcPublish", "rcRollback", "rcSceneToggle", "rcStylesDirty", "reconcile", "revokeInvite", "toggleHash"];
 function dispatchAct(type, e) {
   var el = e && e.target && e.target.closest ? e.target.closest("[data-" + type + "]") : null;
   if (!el) return;
