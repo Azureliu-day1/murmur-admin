@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Murmur 后台</title>
+<title>Murmur 服务器后台</title>
 
 <!--
   Murmur 管理后台 · 单文件,零依赖,零构建。
@@ -274,18 +274,19 @@ table.mini tr.bad td{color:#b0392a}
   <div class="topbar">
     <div class="brand">
       <span class="dot"></span><span class="name">Murmur</span>
-      <span class="tag">admin</span>
+      <span class="tag">服务器后台</span>
     </div>
     <!-- ⚠️ 角标必须在 #who **外面**:render() 每次刷新都会整段重写 #who 的 innerHTML,
          放进去的话它会在第一次刷新时静悄悄消失。 -->
     <a class="navbadge hidden" id="accessNav" href="#access">申请名额 <b id="accessNavNum">0</b> 条待处理</a>
+    <a class="navbadge" href="https://claude.ai/artifact/X26SvBGwoYT6XgdtbVWSuw" target="_blank" rel="noopener" title="开发进度、骨架图、待你定">开发后台 ↗</a>
     <div class="who" id="who"></div>
   </div>
 
   <!-- ── 登录 ─────────────────────────────────────── -->
   <div id="gate" class="gate">
     <div class="card">
-      <h2>管理后台</h2>
+      <h2>服务器后台</h2>
       <p class="note" style="margin-bottom:14px">用管理员邮箱收一个验证码。会话存在这台浏览器里,一小时后自动续,不用再收码。</p>
       <div id="step1">
         <input id="email" type="email" placeholder="管理员邮箱" autocomplete="username">
