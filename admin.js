@@ -2479,7 +2479,10 @@ function phRenderSummary() {
     (s.accepting ? "" : ' <span class="chip banned">暂停受理</span>') + "</span>" +
     item("内测", cap(c.closed, s.closed_cap)) + item("公测", cap(c["public"], s.public_cap)) +
     item("总", cap(phN(c.closed) + phN(c["public"]), s.total_cap)) +
-    item("staff", esc(phN(c.staff))) + item("候补", esc(phN(c.waitlisted))) + item("待审", esc(phN(c.pending))) +
+    item("staff", esc(phN(c.staff))) + item("候补", esc(phN(c.waitlisted))) +
+    // FIX2 B6:待审只数等你审的;等首次登录(公测已够格,登录时自动开座)单列 —— 旧服务端没拆就退回 pending
+    item("待审", esc(c.pending_review != null ? phN(c.pending_review) : phN(c.pending))) +
+    (phN(c.pending_login) ? item("等首次登录", esc(phN(c.pending_login))) : "") +
     '<span><span class="muted">本月预算</span> ' + phBar(u) + " <b>" + esc(usd(u.used)) + " / " + esc(u.cap == null ? "—" : usd(u.cap)) +
     "</b> <span class=\"muted\">" + esc(phPct(u.ratio)) + "</span></span></div>";
 }

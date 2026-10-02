@@ -962,6 +962,7 @@ const CFG_CASES = [
     await w.call("phSetPhase", "public");
     r.push([w.$("phPhaseMsg").innerHTML.includes("现有待审 2 人已标为等首次登录"), "写完按服务端 marked_eligible 说「现有待审 2 人已标为等首次登录」"]);
     r.push([w.$("phPhase").innerHTML.includes("第一次用邮箱验证码登录时开座"), "阶段卡「新申请怎么处理」= 第一次用邮箱验证码登录时开座"]);
+    r.push([w.$("phSummary").innerHTML.includes("等首次登录</span> <b>2</b>") && w.$("phSummary").innerHTML.includes("待审</span> <b>0</b>"), "顶部现状:转公测后待审 0 · 等首次登录 2(B6)"]);
     w.st.confirm = false;
     await w.call("phSetAccepting", false);
     r.push([w.confirms.at(-1).includes("申请照收、回「已收到」") && w.confirms.at(-1).includes("不开座"), "暂停受理确认框:申请照收、回「已收到」,不开座"]);
