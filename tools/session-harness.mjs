@@ -1025,6 +1025,20 @@ const CFG_CASES = [
     r.push([top.includes("阶段 内测 → 公测") && !top.includes("内测上限"), "转公测那条只写「阶段 内测 → 公测」"]);
     return r;
   }],
+  // ── FIX2 B7′:「30 天功能使用」如实说 —— 0.53 起本机那句也上报(route = local);数据带 route 就按 route 分行
+  ["af) FIX2 B7′ · 功能使用的说明不再说「本机一次都不会出现」;带 route 的数据按 route 分两行", async () => {
+    const stats = (tot) => () => [200, { admin: "admin@example.com", server_time: T0, overview: {}, users: [], anomalies: [], plans: [], audit: [],
+      invites: [], daily: [], features: [], feature_totals: tot, apis: {} }];
+    const r = [];
+    r.push([!HTML.includes("一次都不会出现在这里") && HTML.includes("route = local") && HTML.includes("本机用量<b>也在这里</b>"), "说明:本机那句也上报(route = local),不再说一次都不会出现"]);
+    const w1 = await cfgWorld({ "/admin/stats": stats([{ feature: "dictation", count: 12, chars: 300, users: 3 }]) });
+    r.push([w1.$("featRank").innerHTML.includes("听写") && w1.$("featRank").innerHTML.includes("还没按 route 拆"), "没 route 的数据:一行听写 + 一句「还没按 route 拆」"]);
+    const w2 = await cfgWorld({ "/admin/stats": stats([{ feature: "dictation", route: "local", count: 8, chars: 200, users: 2 },
+                                                        { feature: "dictation", route: "sponsored", count: 4, chars: 100, users: 1 }]) });
+    const f2 = w2.$("featRank").innerHTML;
+    r.push([f2.includes("听写 · 本机") && f2.includes("听写 · 代付") && !f2.includes("还没按 route 拆"), "带 route:听写 · 本机 / 听写 · 代付 两行"]);
+    return r;
+  }],
 ];
 
 let cfgBad = 0;

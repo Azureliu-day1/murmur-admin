@@ -183,8 +183,8 @@
       <div class="card">
         <div class="eyebrow">features · <b>30 天功能使用</b></div>
         <div id="featRank"></div>
-        <p class="note">⚠️ 这是<b>代付口径</b>:服务端只看得见经过服务器的动作。没登录的人、
-          以及整条链路都在本机跑的动作(本机识别 + 不整理),一次都不会出现在这里。</p>
+        <p class="note" id="featNote">⚠️ 这是<b>报账口径</b>:App 每句用完都向服务端报字数与时长。0.53 起,整条链路都在本机跑的那句
+          (本机识别 + 不整理)也会上报,记作 route = local —— 所以本机用量<b>也在这里</b>,按 route 区分;没登录的人不在这里。</p>
       </div>
       <div class="card">
         <div class="eyebrow">daily · <b>每天用量(墨尔本日界)</b></div>

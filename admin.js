@@ -627,6 +627,8 @@ function doAction(action, userId) {
 
 // ── 功能使用 ──────────────────────────────────────
 var FEAT_NAME = { dictation: "听写", polish: "整理", ask: "随心问", lecture: "长录音" };
+// FIX2 B7′:/usage 的 route(local = 本机识别 + 不整理;其余经服务器)。统计数据带 route 时按它分行
+var FEAT_ROUTE = { local: "本机", sponsored: "代付", byok: "自带 key", proxy: "代理整理" };
 var FEAT_COLOR = { dictation: "var(--coral)", polish: "var(--llm)", ask: "var(--green)", lecture: "var(--warn)" };
 
 function renderFeatures(totals, daily) {
@@ -634,10 +636,13 @@ function renderFeatures(totals, daily) {
     $("featRank").innerHTML = '<p class="muted">30 天内还没有经过服务器的功能使用。</p>';
   } else {
     var max = Math.max.apply(null, totals.map(function (t) { return Number(t.count); }));
-    $("featRank").innerHTML = totals.map(function (t) {
+    var byRoute = totals.some(function (t) { return t.route != null && t.route !== ""; });
+    $("featRank").innerHTML = (byRoute ? "" : '<p class="muted" data-style="font-size:12px">统计还没按 route 拆:本机与经服务器的次数合在一起。</p>') +
+      totals.map(function (t) {
       var w = max > 0 ? (Number(t.count) / max * 100) : 0;
+      var nm = (FEAT_NAME[t.feature] || t.feature) + (byRoute ? " · " + (FEAT_ROUTE[t.route] || t.route || "未标") : "");
       return '<div class="rank-row">' +
-        "<span>" + esc(FEAT_NAME[t.feature] || t.feature) + "</span>" +
+        "<span>" + esc(nm) + "</span>" +
         '<span class="rank-bar" data-style="width:' + w.toFixed(1) + "%;background:" + (FEAT_COLOR[t.feature] || "var(--coral)") + '"></span>' +
         '<span class="n">' + esc(t.count) + " 次 · " + esc(t.users) + " 人</span></div>";
     }).join("");
