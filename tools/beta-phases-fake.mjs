@@ -133,7 +133,9 @@ export function createFake(scene = "closed") {
       }
       const next = { ...st.settings, ...p };
       if (!(next.budget_alert_ratio < next.budget_stop_ratio)) return fail(400, "out_of_range", "告警比例要小于停止比例");
-      const before = {}; keys.forEach((k) => { before[k] = st.settings[k]; });
+      // FIX2 B7:审计同服务端 murmur_access_set —— 存整行前后值(去掉 updated_at / updated_by),页面自己挑出改了的格子
+      const row = (x) => { const o = { ...x }; delete o.updated_at; delete o.updated_by; return o; };
+      const before = row(st.settings);
       // FIX2 B1(同服务端 murmur_access_set):内测 → 公测那一刻,现有待审(new、未标)一并标 eligible,回 marked_eligible
       let marked = 0;
       if (st.settings.phase === "closed" && next.phase === "public") {
@@ -142,7 +144,7 @@ export function createFake(scene = "closed") {
         st.counts.pending_review = Math.max(0, (st.counts.pending_review || 0) - marked);
       }
       Object.assign(st.settings, p, { updated_at: new Date().toISOString(), updated_by: ADMIN });
-      audit("access_set", before, { ...p });
+      audit("access_set", before, row(st.settings));
       return [200, { ok: true, marked_eligible: marked, settings: { ...st.settings } }];
     }
     if (act === "cohort_quotas_set") {
@@ -152,9 +154,9 @@ export function createFake(scene = "closed") {
         if (!QUOTA_KEYS.includes(k)) return fail(400, "bad_key", "不认识的额度:" + k);
         const e = checkNum(k, p[k]); if (e) return fail(400, "out_of_range", e);
       }
-      const before = {}; Object.keys(p).forEach((k) => { before[k] = st.quotas[b.cohort][k]; });
+      const before = { cohort: b.cohort, ...st.quotas[b.cohort] };      // FIX2 B7:整行(同服务端)
       Object.assign(st.quotas[b.cohort], p);
-      audit("cohort_quotas_set", before, { ...p }, b.cohort);
+      audit("cohort_quotas_set", before, { cohort: b.cohort, ...st.quotas[b.cohort] });
       return [200, { ok: true }];
     }
     if (act === "waitlist_release") {
@@ -167,8 +169,12 @@ export function createFake(scene = "closed") {
       st.requests.forEach((r) => { if (left > 0 && r.status === "waitlisted") { r.status = "approved"; r.has_seat = true; r.handled_by = ADMIN; r.handled_at = new Date().toISOString(); left--; } });
       st.counts.waitlisted -= k; st.counts.released_today += k;
       if (s.phase === "public") st.counts.public += k; else st.counts.closed += k;
-      audit("waitlist_release", { waitlisted: st.counts.waitlisted + k }, { released: k, waitlisted: st.counts.waitlisted });
-      return [200, { ok: true, released: k, reason: stopped ? "到预算停止线" : k < n ? "受名额 / 每天上限 / 候补人数限制" : null }];
+      // FIX2 B7:原因回服务端的英文码(murmur_waitlist_release:budget / public_cap / closed_cap / daily_max;候补放完了是 null),页面负责翻成中文
+      const code = stopped ? "budget" : room(s) <= 0 && k < n ? (s.phase === "public" ? "public_cap" : "closed_cap")
+                 : k < n && st.counts.released_today >= s.release_daily_max ? "daily_max" : null;
+      audit("waitlist_release", { asked: n, daily_left: s.release_daily_max - st.counts.released_today + k },
+            { released: k, skipped_no_identity: 0, declined: 0, stopped: code });
+      return [200, { ok: true, released: k, stopped: code, reason: code }];
     }
     if (act === "staff_add") {
       const email = String(b.email || "").trim().toLowerCase();

@@ -940,7 +940,8 @@ const CFG_CASES = [
     r.push([w.$("phAudit").innerHTML.split("<tr>").length - 2 === 5, "留痕表 5 条(最近 10 条以内全列)"]);
     const wf = await phWorld("public");                    // 公测 100/100 满着
     await wf.call("phRelease");
-    r.push([wf.fake.state.counts.waitlisted === 20 && wf.$("phReleaseMsg").innerHTML.includes("放出 0 人") && wf.$("phReleaseMsg").innerHTML.includes("受名额"), "公测满着 → 放行一批照实说「放出 0 人(受名额……)」,不假装放了"]);
+    // FIX2 B7 改口:旧预期「受名额……」是假服务自己回的中文原因;真服务端回英文码(public_cap),页面翻成「公测名额满了」
+    r.push([wf.fake.state.counts.waitlisted === 20 && wf.$("phReleaseMsg").innerHTML.includes("放出 0 人") && wf.$("phReleaseMsg").innerHTML.includes("公测名额满了"), "公测满着 → 放行一批照实说「放出 0 人(公测名额满了)」,不假装放了"]);
     const wp = await phWorld("public", f => { f.state.settings.public_cap = 300; });
     await wp.call("phRelease");
     r.push([wp.confirms.at(-1).includes("放最多 10 人") && wp.fake.state.counts.waitlisted === 10 && wp.$("phReleaseMsg").innerHTML.includes("放出 10 人") &&
@@ -992,6 +993,36 @@ const CFG_CASES = [
     r.push([w2.$("accessCount").innerHTML.includes("待处理 1") && w2.$("accessCount").innerHTML.includes("等首次登录 2"), "counts 没拆时按 eligible_at 自己拆"]);
     const cell = (k) => w.win.sourceCell({ source_kind: k });
     r.push([cell("self_serve").includes("自助开座") && cell("release").includes("候补放行") && cell("manual").includes("手动开座") && cell("access_request").includes("官网申请"), "来源:self_serve → 自助开座,release → 候补放行;旧三种照旧"]);
+    return r;
+  }],
+  // ── FIX2 B7:改动记录好读 —— 整行前后值只列改了的格子;新动作 seat_recheck_budget / seat_over_cap 有名字;原因码翻中文
+  ["ae) FIX2 B7 · 留痕只列改了的格子;放行 / 超额 / 预算线各写一句;原因码不露英文", async () => {
+    const w = await phWorld("closed", f => {
+      const row = { phase: "closed", accepting: true, auto_release: false, closed_cap: 20, public_cap: 100, total_cap: 120, release_batch: 10,
+                    release_daily_max: 20, site_budget_micro_usd: 60e6, staff_budget_micro_usd: 50e6, budget_alert_ratio: 0.7, budget_stop_ratio: 0.85 };
+      f.state.audit.push(
+        { id: 9, at: "2026-10-01T05:00:00Z", actor: "admin@example.com", action: "access_set", target: null, before: row, after: { ...row, public_cap: 300 }, reason: "" },
+        { id: 8, at: "2026-10-01T04:00:00Z", actor: "auto:cron", action: "waitlist_release", target: null, before: { asked: 10, daily_left: 20 },
+          after: { released: 3, skipped_no_identity: 1, declined: 0, stopped: "public_cap" }, reason: "" },
+        { id: 7, at: "2026-10-01T03:30:00Z", actor: "admin@example.com", action: "seat_recheck_budget", target: "ops@example.com",
+          before: { status: "active", cohort: "closed" }, after: { status: "active", via: "staff_remove", reason: "budget", kept: true }, reason: "离职" },
+        { id: 6, at: "2026-10-01T03:20:00Z", actor: "admin@example.com", action: "seat_over_cap", target: "ops2@example.com",
+          before: { status: "active", cohort: "closed" }, after: { status: "active", via: "staff_remove", reason: "closed_cap", kept: true }, reason: "" },
+        { id: 5, at: "2026-10-01T03:10:00Z", actor: "admin@example.com", action: "cohort_quotas_set", target: null,
+          before: { cohort: "public", weekly_chars: 2000, monthly_cost_cap_micro_usd: 500000, ime_cloud_daily: 300, lecture_trial_seconds: 180 },
+          after: { cohort: "public", weekly_chars: 4000, monthly_cost_cap_micro_usd: 500000, ime_cloud_daily: 300, lecture_trial_seconds: 180 }, reason: "" });
+    });
+    const a = w.$("phAudit").innerHTML, r = [];
+    r.push([a.includes("公测上限 100 → 300") && !a.includes("内测上限 20 → 20") && !a.includes("告警比例 70% → 70%"), "改设置那条只列「公测上限 100 → 300」,没改的十一个格子不列"]);
+    r.push([a.includes("放出 3 人,没账号跳过 1;停在:公测名额满了"), "放行:放出 3 人,没账号跳过 1;停在:公测名额满了"]);
+    r.push([a.includes("移出 staff 撞预算线") && a.includes("ops@example.com · 人数放得下,但全站预算到停止线"), "seat_recheck_budget 有中文名和一句话"]);
+    r.push([a.includes("超出上限(保留)") && a.includes("名额超出上限(内测名额满了)"), "seat_over_cap 有中文名,原因码翻成「内测名额满了」"]);
+    r.push([a.includes("公测 · 每周字数 2000 → 4000") && !a.includes("月成本帽(美元) $0.50 → $0.50"), "改额度:带档名、只列改了的格子"]);
+    r.push([!/>(public_cap|closed_cap|budget|phase_closed|daily_max)</.test(a) && !a.includes("停在:public_cap"), "原因码不以英文露在变化栏"]);
+    // 真走一次:转公测后留痕只出现「阶段 内测 → 公测」
+    await w.call("phSetPhase", "public");
+    const top = w.$("phAudit").innerHTML.split("<tr>")[2] || "";
+    r.push([top.includes("阶段 内测 → 公测") && !top.includes("内测上限"), "转公测那条只写「阶段 内测 → 公测」"]);
     return r;
   }],
 ];

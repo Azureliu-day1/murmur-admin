@@ -2259,8 +2259,14 @@ var PH_FORM_HOST = { caps: "phCapsForm", budget: "phBudgetForm", release: "phRel
 var PH_FORM_MSG = { caps: "phCapsMsg", budget: "phBudgetMsg", release: "phReleaseMsg" };
 var PH_QKEYS = ["weekly_chars", "monthly_cost_cap_micro_usd", "ime_cloud_daily", "lecture_trial_seconds"];
 var PH_COHORTS = [["closed", "内测"], ["public", "公测"]];
-var PH_AUDIT_RE = /^(access_set|cohort_quotas_set|waitlist_release|staff_add|staff_remove|access_phase|phase\.)/;
-var PH_ACTION_NAME = { access_set: "改设置", cohort_quotas_set: "改额度", waitlist_release: "放行一批", staff_add: "加 staff", staff_remove: "移出 staff" };
+var PH_AUDIT_RE = /^(access_set|cohort_quotas_set|waitlist_release|staff_add|staff_remove|seat_over_cap|seat_recheck_budget|access_phase|phase\.)/;
+var PH_ACTION_NAME = { access_set: "改设置", cohort_quotas_set: "改额度", waitlist_release: "放行一批", staff_add: "加 staff", staff_remove: "移出 staff",
+                       seat_over_cap: "超出上限(保留)", seat_recheck_budget: "移出 staff 撞预算线" };
+// FIX2 B7:服务端的放行 / 满额原因码 → 中文短句(murmur_waitlist_release 的 reason / stopped,murmur_seat_capacity 的返回值)
+var PH_REASON = { auto_release_off: "自动放行关着", phase_closed: "现在是内测,不放行", daily_max: "今天的放行上限到了",
+                  public_cap: "公测名额满了", closed_cap: "内测名额满了", total_cap: "总名额满了", budget: "全站预算到停止线",
+                  queue: "前面还有人在候补", full: "名额满了", no_settings: "服务端设置缺失" };
+function phReason(code) { return code == null || code === "" ? "" : (PH_REASON[code] || String(code)); }
 
 function phCur() { return (PH && PH.settings) || {}; }
 function phCounts() { return (PH && PH.counts) || {}; }
@@ -2621,7 +2627,7 @@ function phRelease() {
     ["放行一批:候补 " + phN(c.waitlisted) + " 人里按入队先后放最多 " + n + " 人"],
     (c.released_today != null ? "今天已放 " + phN(c.released_today) + " / 每天上限 " + s.release_daily_max + ";" : "每天上限 " + s.release_daily_max + ";") +
     "名额满或到预算停止线会少放或不放;放出的人收到「名额开好了」信",
-    function (j) { return j.released != null ? "放出 " + j.released + " 人" + (j.reason ? "(" + j.reason + ")" : "") : "放行已提交"; });
+    function (j) { return j.released != null ? "放出 " + j.released + " 人" + (j.reason ? "(" + phReason(j.reason) + ")" : "") : "放行已提交"; });
 }
 
 // ── 两档额度 ─────────────────────────────────────────────
@@ -2711,6 +2717,25 @@ function phStaffRemove(uid) {
 }
 
 // ── 留痕:最近 10 条 ─────────────────────────────────────
+// FIX2 B7:服务端改设置的审计存的是整行前后值(十二个格子)—— 只列前后值不同的格子;
+//   放行 / 超额 / 预算线这几种按各自的形状写一句,原因码翻成中文。
+function phAuditChange(r) {
+  var b = r.before || {}, a = r.after || {}, act = String(r.action || ""), who = r.target ? String(r.target) + " · " : "";
+  if (typeof a !== "object" || a === null) return String(a);
+  if (act === "waitlist_release") {
+    var n = a.released != null ? a.released : "?";
+    return "放出 " + n + " 人" + (phN(a.skipped_no_identity) ? ",没账号跳过 " + phN(a.skipped_no_identity) : "") +
+      (phN(a.declined) ? ",停用跳过 " + phN(a.declined) : "") + (a.stopped ? ";停在:" + phReason(a.stopped) : "");
+  }
+  if (act === "seat_over_cap") return who + "名额超出上限(" + phReason(a.reason) + "):不踢人、保留名额,回到上限内之前停止新增";
+  if (act === "seat_recheck_budget") return who + "人数放得下,但全站预算到停止线:不算超额,调云端由全站闸约束";
+  if (act === "staff_add" || act === "staff_remove") return who + (act === "staff_add" ? "加入 staff" : "移出 staff");
+  function name(k) { return PH_FIELDS[k] ? PH_FIELDS[k][0] : k === "phase" ? "阶段" : k === "accepting" ? "受理新申请" : k; }
+  var keys = Object.keys(a).filter(function (k) { return k !== "cohort" && JSON.stringify(a[k]) !== JSON.stringify(b[k]); });
+  var pre = act === "cohort_quotas_set" && (a.cohort || r.target) ? phPhaseName(a.cohort || r.target) + " · " : "";
+  if (!keys.length) return pre + "没有格子变化";
+  return pre + keys.map(function (k) { return name(k) + " " + (b[k] == null ? "—" : phFmt(k, b[k])) + " → " + phFmt(k, a[k]); }).join(";");
+}
 function phAuditRows() {
   var rows = PH && PH.audit ? PH.audit
     : ((DATA && DATA.audit) || []).filter(function (r) { return PH_AUDIT_RE.test(String(r.action || "")); });
@@ -2721,12 +2746,8 @@ function phRenderAudit() {
   if (!rows.length) { $("phAudit").innerHTML = '<tbody><tr><td class="muted">还没有开放阶段的改动。</td></tr></tbody>'; return; }
   $("phAudit").innerHTML = "<thead><tr><th>时间</th><th class=\"mob-hide\">操作人</th><th>动作</th><th>变化</th><th class=\"mob-hide\">理由</th></tr></thead><tbody>" +
     rows.map(function (r) {
-      var b = r.before || {}, a = r.after || {}, chg = "";
-      try {
-        chg = typeof a === "object" ? Object.keys(a).map(function (k) {
-          return (PH_FIELDS[k] ? PH_FIELDS[k][0] : k === "phase" ? "阶段" : k === "accepting" ? "受理新申请" : k) + " " + (b[k] == null ? "—" : phFmt(k, b[k])) + " → " + phFmt(k, a[k]);
-        }).join(";") : String(a);
-      } catch (e) {}
+      var chg = "";
+      try { chg = phAuditChange(r); } catch (e) {}
       return "<tr><td>" + esc(when(r.at || r.created_at)) + '</td><td class="mob-hide">' + esc(r.actor || r.actor_email || "—") + "</td>" +
         "<td>" + esc(PH_ACTION_NAME[r.action] || r.action) + '<div class="cfg-when mono">' + esc(r.action) + "</div></td>" +
         '<td class="cfg-diff">' + esc(chg || cfgBrief(r.target)) + '</td><td class="mob-hide">' + esc(r.reason || "—") + "</td></tr>";
