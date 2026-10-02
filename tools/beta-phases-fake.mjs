@@ -43,8 +43,9 @@ export function seed(scene = "closed") {
                 release_batch: 10, release_daily_max: 20,
                 site_budget_micro_usd: 60e6, staff_budget_micro_usd: 5e6, budget_alert_ratio: 0.7, budget_stop_ratio: 0.85,
                 updated_at: T0, updated_by: ADMIN },
-    counts: pub ? { closed: 18, public: 100, staff: 1, waitlisted: 20, pending: 0, released_today: 0 }
-                : { closed: 4, public: 0, staff: 1, waitlisted: 0, pending: 2, released_today: 0 },
+    // FIX2 B2:pending = pending_review(等审核)+ pending_login(等首次登录,公测已标 eligible)—— 与服务端 murmur_access_get 同形
+    counts: pub ? { closed: 18, public: 100, staff: 1, waitlisted: 20, pending: 0, pending_review: 0, pending_login: 0, released_today: 0 }
+                : { closed: 4, public: 0, staff: 1, waitlisted: 0, pending: 2, pending_review: 2, pending_login: 0, released_today: 0 },
     budget: { month: "2026-10",
               site: pub ? { reserved_micro_usd: 1.5e6, spent_micro_usd: 41e6 } : { reserved_micro_usd: 0.4e6, spent_micro_usd: 7.6e6 },
               staff: { reserved_micro_usd: 0, spent_micro_usd: 1.2e6 } },
@@ -56,7 +57,7 @@ export function seed(scene = "closed") {
   // 申请名额栏的假行:候补的人数和 counts.waitlisted 对上
   let n = 100;
   const req = (status, i, extra) => Object.assign({ id: uid(++n), email: "applicant" + i + "@example.com", note: "", lang: "zh",
-    created_at: T0, has_seat: status === "approved", has_user: true, status }, extra || {});
+    created_at: T0, has_seat: status === "approved", has_user: true, status, eligible_at: null }, extra || {});
   if (pub) {
     for (let i = 1; i <= s.counts.waitlisted; i++) s.requests.push(req("waitlisted", i, { queued_at: T0 }));
   } else {
@@ -133,9 +134,16 @@ export function createFake(scene = "closed") {
       const next = { ...st.settings, ...p };
       if (!(next.budget_alert_ratio < next.budget_stop_ratio)) return fail(400, "out_of_range", "告警比例要小于停止比例");
       const before = {}; keys.forEach((k) => { before[k] = st.settings[k]; });
+      // FIX2 B1(同服务端 murmur_access_set):内测 → 公测那一刻,现有待审(new、未标)一并标 eligible,回 marked_eligible
+      let marked = 0;
+      if (st.settings.phase === "closed" && next.phase === "public") {
+        st.requests.forEach((r) => { if (r.status === "new" && !r.eligible_at) { r.eligible_at = new Date().toISOString(); marked++; } });
+        st.counts.pending_login = (st.counts.pending_login || 0) + marked;
+        st.counts.pending_review = Math.max(0, (st.counts.pending_review || 0) - marked);
+      }
       Object.assign(st.settings, p, { updated_at: new Date().toISOString(), updated_by: ADMIN });
       audit("access_set", before, { ...p });
-      return [200, { ok: true, settings: { ...st.settings } }];
+      return [200, { ok: true, marked_eligible: marked, settings: { ...st.settings } }];
     }
     if (act === "cohort_quotas_set") {
       if (!st.quotas[b.cohort]) return fail(400, "bad_cohort", "cohort 只能是 closed / public");

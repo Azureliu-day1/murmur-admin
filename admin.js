@@ -2352,17 +2352,21 @@ function phImpact(patch) {
 
   if ("phase" in patch) {
     if (patch.phase === "public") {
-      out.push("新申请未满就当场开座(公测还能进 " + room(S) + " 人),满了进候补");
+      // FIX2 B5:开座发生在申请人第一次用邮箱验证码登录时(不是申请那一刻);B1:现有待审在这一刻一并标「等首次登录」
+      out.push("公测期:第一次用邮箱验证码登录时开座(公测还能进 " + room(S) + " 人),满了进候补");
+      var nPend = c.pending_review != null ? phN(c.pending_review) : phN(c.pending);
+      if (nPend > 0) out.push(S.accepting ? "现有待审 " + nPend + " 人会在下次登录时开座(同样受上限约束,满了进候补)"
+                                          : "现有待审 " + nPend + " 人标为等首次登录,恢复受理后登录才开座");
       out.push("候补 " + nW + " 人" + (S.auto_release ? "会按" + releaseRule(S) + "自动放出" : ",自动放行关着,不会自动放出"));
       out.push("内测用户保留原身份与额度;不碰注册开关");
-      if (!S.accepting) out.push("但现在暂停受理中,新申请仍然只记不开");
+      if (!S.accepting) out.push("但现在暂停受理中:申请照收、回「已收到」,不开座");
     } else {
       out.push("停止自动开座,已开的 " + nP + " 个公测名额不收回;新申请回到你手动审批");
     }
   }
   if ("accepting" in patch) {
     out.push(patch.accepting ? "恢复后按「" + phPhaseName(S.phase) + "」规则处理新申请"
-                             : "新申请照记,但回「暂停受理」:不开座、不进候补;已在候补的 " + nW + " 人不动");
+                             : "申请照收、回「已收到」,不开座、不进候补;已在候补的 " + nW + " 人不动");
   }
   var capKeys = ["closed_cap", "public_cap", "total_cap"].filter(function (k) { return k in patch; });
   capKeys.forEach(function (k) {
@@ -2460,8 +2464,8 @@ function phRenderSummary() {
 
 function phRenderPhase() {
   var s = phCur();
-  var how = !s.accepting ? "记下申请,回「暂停受理」,不开座、不进候补"
-    : s.phase === "public" ? "未满当场开座,满了进候补" : "进待审,你手动开";
+  var how = !s.accepting ? "申请照收、回「已收到」,不开座"
+    : s.phase === "public" ? "公测期:第一次用邮箱验证码登录时开座,满了进候补" : "进待审,你手动开";
   $("phPhase").innerHTML =
     '<div class="kv"><span class="k">现在</span><span class="v"><b>' + esc(phPhaseName(s.phase)) + "</b> · " +
     (s.accepting ? "受理中" : "暂停受理") + "</span></div>" +
@@ -2585,7 +2589,11 @@ function phSetPhase(to) {
   var cur = phCur();
   if (!PH || cur.phase === to) return;
   return phWrite("phPhaseMsg", "access_set", { patch: { phase: to } },
-                 ["阶段 " + phPhaseName(cur.phase) + " → " + phPhaseName(to)], phImpact({ phase: to }));
+                 ["阶段 " + phPhaseName(cur.phase) + " → " + phPhaseName(to)], phImpact({ phase: to }),
+                 function (j) {                       // B1:服务端回这一刻标了几个现有待审
+                   return "已生效:阶段 " + phPhaseName(cur.phase) + " → " + phPhaseName(to) +
+                     (j.marked_eligible > 0 ? ";现有待审 " + j.marked_eligible + " 人已标为等首次登录,下次登录时开座" : "");
+                 });
 }
 function phSetAccepting(on) {
   var cur = phCur();

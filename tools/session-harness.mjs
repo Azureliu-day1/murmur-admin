@@ -947,6 +947,29 @@ const CFG_CASES = [
             wp.$("phSummary").innerHTML.includes("110 / 300"), "公测有空位 + 有候补 → 放行一批:按每批 10 放出 10 人,现状跟着变"]);
     return r;
   }],
+  // ── FIX2(R2 回看)B5:开放阶段页的说法按服务端现行为 —— 首次验证码登录才开座、暂停受理回「已收到」、转公测带上现有待审
+  ["ac) FIX2 B5 · 文案按现行为:公测 = 第一次用邮箱验证码登录时开座;暂停受理 = 申请照收回「已收到」;转公测说出现有待审 N 人", async () => {
+    const w = await phWorld("closed"), r = [];
+    r.push([!HTML.includes("当场开座") && !HTML.includes("回「暂停受理」") && !HTML.includes("只记不开"), "旧说法(当场开座 / 回「暂停受理」/ 只记不开)全文没了"]);
+    r.push([HTML.includes("第一次用邮箱验证码登录时") && HTML.includes("申请照收、回「已收到」"), "说明段写的是现行为"]);
+    w.st.confirm = false;
+    await w.call("phSetPhase", "public");
+    const c1 = w.confirms.at(-1);
+    r.push([c1.includes("第一次用邮箱验证码登录时开座") && c1.includes("满了进候补"), "转公测确认框:第一次用邮箱验证码登录时开座,满了进候补"]);
+    r.push([c1.includes("现有待审 2 人会在下次登录时开座"), "转公测确认框带上「现有待审 2 人会在下次登录时开座」"]);
+    w.st.confirm = true;
+    await w.call("phSetPhase", "public");
+    r.push([w.$("phPhaseMsg").innerHTML.includes("现有待审 2 人已标为等首次登录"), "写完按服务端 marked_eligible 说「现有待审 2 人已标为等首次登录」"]);
+    r.push([w.$("phPhase").innerHTML.includes("第一次用邮箱验证码登录时开座"), "阶段卡「新申请怎么处理」= 第一次用邮箱验证码登录时开座"]);
+    w.st.confirm = false;
+    await w.call("phSetAccepting", false);
+    r.push([w.confirms.at(-1).includes("申请照收、回「已收到」") && w.confirms.at(-1).includes("不开座"), "暂停受理确认框:申请照收、回「已收到」,不开座"]);
+    const wp = await phWorld("closed", f => { f.state.settings.accepting = false; });
+    wp.st.confirm = false;
+    await wp.call("phSetPhase", "public");
+    r.push([wp.confirms.at(-1).includes("恢复受理后登录才开座") && wp.confirms.at(-1).includes("申请照收、回「已收到」,不开座"), "暂停受理中转公测:现有待审恢复受理后登录才开座"]);
+    return r;
+  }],
 ];
 
 let cfgBad = 0;
