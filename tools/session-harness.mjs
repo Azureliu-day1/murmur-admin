@@ -970,6 +970,30 @@ const CFG_CASES = [
     r.push([wp.confirms.at(-1).includes("恢复受理后登录才开座") && wp.confirms.at(-1).includes("申请照收、回「已收到」,不开座"), "暂停受理中转公测:现有待审恢复受理后登录才开座"]);
     return r;
   }],
+  // ── FIX2 B6:申请列表把「等首次登录」单独显示;用户列表来源认 self_serve(login:)/ release(auto:)
+  ["ad) FIX2 B6 · 「等首次登录」单独一类、不算待处理;来源认自助开座 / 候补放行", async () => {
+    const reqs = [
+      { id: "11111111-1111-4111-8111-111111111111", email: "review@example.com", status: "new", created_at: T0, eligible_at: null, has_seat: false, has_user: true },
+      { id: "44444444-4444-4444-8444-444444444444", email: "login@example.com", status: "new", created_at: T0, eligible_at: T0, has_seat: false, has_user: true },
+      { id: "55555555-5555-4555-8555-555555555555", email: "login2@example.com", status: "new", created_at: T0, eligible_at: T0, has_seat: false, has_user: true },
+    ];
+    const w = await cfgWorld({ "/admin/access-requests": () => [200, { requests: reqs, counts: { new: 3, new_review: 1, new_login: 2, waitlisted: 0, approved: 0, declined: 0, total: 3 } }] });
+    const tbl = () => w.$("accessTable").innerHTML, r = [];
+    r.push([w.$("accessCount").innerHTML.includes("待处理 1") && w.$("accessCount").innerHTML.includes("等首次登录 2"), "计数行:待处理 1 · 等首次登录 2(不再把够格的人算进待处理)"]);
+    r.push([w.$("accessNavNum").innerHTML === "1", "顶栏角标只数等你审的 1 条"]);
+    r.push([w.$("accessFilters").innerHTML.includes(btnSig("accessFilterSet", "login")) && w.$("accessFilters").innerHTML.includes("等首次登录"), "筛选条有「等首次登录」"]);
+    r.push([(tbl().match(/等首次登录/g) || []).length === 2 && tbl().includes("登录即开座"), "两行够格的显示「等首次登录 · 登录即开座」"]);
+    await w.call("accessFilterSet", "login");
+    r.push([tbl().includes("login@example.com") && tbl().includes("login2@example.com") && !tbl().includes("review@example.com"), "点「等首次登录」只剩够格的两行"]);
+    await w.call("accessFilterSet", "new");
+    r.push([tbl().includes("review@example.com") && !tbl().includes("login@example.com"), "点「待处理」只剩等审核那一行"]);
+    // 旧服务端(counts 没有 new_login):按行里的 eligible_at 数
+    const w2 = await cfgWorld({ "/admin/access-requests": () => [200, { requests: reqs, counts: { new: 3, waitlisted: 0, approved: 0, declined: 0, total: 3 } }] });
+    r.push([w2.$("accessCount").innerHTML.includes("待处理 1") && w2.$("accessCount").innerHTML.includes("等首次登录 2"), "counts 没拆时按 eligible_at 自己拆"]);
+    const cell = (k) => w.win.sourceCell({ source_kind: k });
+    r.push([cell("self_serve").includes("自助开座") && cell("release").includes("候补放行") && cell("manual").includes("手动开座") && cell("access_request").includes("官网申请"), "来源:self_serve → 自助开座,release → 候补放行;旧三种照旧"]);
+    return r;
+  }],
 ];
 
 let cfgBad = 0;

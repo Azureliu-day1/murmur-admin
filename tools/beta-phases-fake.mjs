@@ -205,6 +205,9 @@ export function createFake(scene = "closed") {
     } else if (method === "GET" && p === "/admin/access-requests") {
       const c = { new: 0, waitlisted: 0, approved: 0, declined: 0, total: st.requests.length };
       st.requests.forEach((r) => { c[r.status] = (c[r.status] || 0) + 1; });
+      // FIX2 B2 / B6:同服务端 —— 「新」拆成等审核 / 等首次登录(eligible_at 非空)
+      c.new_login = st.requests.filter((r) => r.status === "new" && r.eligible_at).length;
+      c.new_review = c.new - c.new_login;
       out = [200, { requests: st.requests.map((r) => ({ ...r })), counts: c }];
     } else if (method === "GET" && p === "/admin/config") {
       out = [403, { error: { message: "假服务不带配置块", code: "not_admin" } }];     // 配置块整块藏起来,截图只看开放阶段

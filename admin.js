@@ -361,7 +361,8 @@ function visibleUsers() {
 }
 
 // 来源:这个人是怎么进来的。⛔ 不编 —— 审计表里查不到就写「查不到」。
-var SOURCE_LABEL = { invite: "邀请码", access_request: "官网申请", manual: "手动开座" };
+// FIX2 B6:公测起服务端多两种 —— self_serve(首次验证码登录时自助开座,操作人 login:)/ release(候补自动放行,操作人 auto:)
+var SOURCE_LABEL = { invite: "邀请码", access_request: "官网申请", self_serve: "自助开座", release: "候补放行", manual: "手动开座" };
 
 function sourceCell(u) {
   var k = String(u.source_kind || "unknown");
@@ -1035,7 +1036,10 @@ function loadAccess() {
 }
 
 // 申请名额的筛选(2026-10-01 加「候补」):只在页面里筛 —— /admin/access-requests 的请求不变
-var ACCESS_FILTERS = [["all", "全部"], ["new", "待处理"], ["waitlisted", "候补"], ["approved", "开了"], ["declined", "没开"]];
+// FIX2 B6:「新」拆两类 —— 待处理(等你审)/ 等首次登录(公测已够格,登录时服务端自动开座,⛔ 不用手点)
+var ACCESS_FILTERS = [["all", "全部"], ["new", "待处理"], ["login", "等首次登录"], ["waitlisted", "候补"], ["approved", "开了"], ["declined", "没开"]];
+function accessIsLogin(r) { return r.status === "new" && !!r.eligible_at; }
+function accessKind(r) { return accessIsLogin(r) ? "login" : r.status; }
 var accessFilter = "all";
 function accessFilterSet(f) { accessFilter = f; renderAccess(); }
 
@@ -1048,7 +1052,9 @@ function accessRowById(id) {
 function renderAccess() {
   var rows = (ACCESS && ACCESS.requests) || [];
   var c = (ACCESS && ACCESS.counts) || {};
-  var pending = Number(c["new"] || 0);
+  // 等首次登录的人不算「待处理」:服务端回 new_login 就用它,旧服务端没有就按行里的 eligible_at 数(只数得到这一页)
+  var loginN = c.new_login != null ? Number(c.new_login) : rows.filter(accessIsLogin).length;
+  var pending = c.new_review != null ? Number(c.new_review) : Math.max(0, Number(c["new"] || 0) - loginN);
 
   // 顶栏角标:没有待处理的就整个藏起来 —— 一个常年挂着「0」的红点,
   // 看几天之后就不再被看见了,那时它真的变红也没人注意。
@@ -1061,7 +1067,7 @@ function renderAccess() {
   var waitN = c.waitlisted != null ? Number(c.waitlisted)
     : rows.filter(function (r) { return r.status === "waitlisted"; }).length;
   $("accessCount").innerHTML = ACCESS
-    ? "待处理 " + esc(pending) + " · 候补 " + esc(waitN) + " · 开了 " + esc(Number(c.approved || 0)) +
+    ? "待处理 " + esc(pending) + (loginN ? " · 等首次登录 " + esc(loginN) : "") + " · 候补 " + esc(waitN) + " · 开了 " + esc(Number(c.approved || 0)) +
       " · 没开 " + esc(Number(c.declined || 0)) + " · 共 " + esc(Number(c.total || 0)) + " 条"
     : "";
 
@@ -1077,7 +1083,7 @@ function renderAccess() {
       '(表单在 murmur 官网「申请名额」那一栏,匿名就能填。)</td></tr></tbody>';
     return;
   }
-  if (accessFilter !== "all") rows = rows.filter(function (r) { return r.status === accessFilter; });
+  if (accessFilter !== "all") rows = rows.filter(function (r) { return accessKind(r) === accessFilter; });
   if (!rows.length) {
     $("accessTable").innerHTML = '<tbody><tr><td class="muted">这一类没有申请。</td></tr></tbody>';
     return;
@@ -1089,7 +1095,8 @@ function renderAccess() {
              "<th class=\"mob-hide\">语言</th>" +
              "<th class=\"mob-hide\">已有名额?</th><th>状态</th><th></th></tr></thead>";
   var body = rows.map(function (r) {
-    var isNew = r.status === "new";
+    var isLogin = accessIsLogin(r);
+    var isNew = r.status === "new" && !isLogin;
 
     // 已有名额:这一列是为了不让人对着一个早就开过座的邮箱再按一次
     var seat = r.has_seat
@@ -1097,7 +1104,11 @@ function renderAccess() {
       : (r.has_user ? '<span class="muted">没有 · 但已有账号</span>' : '<span class="muted">没有</span>');
 
     var state;
-    if (isNew) {
+    if (isLogin) {
+      // 公测期已够格(eligible_at):他第一次用邮箱验证码登录时服务端在锁内开座(满了进候补),不用你点
+      state = '<span class="chip">等首次登录</span>' +
+        '<div class="muted" data-style="font-size:11.5px">登录即开座 · 够格于 ' + esc(when(r.eligible_at)) + "</div>";
+    } else if (isNew) {
       state = "<b>新</b>";
     } else if (r.status === "waitlisted") {
       // 对外只说「已进候补」,不报第几位;后台这里看入队时间(重试不改它)
@@ -1112,7 +1123,7 @@ function renderAccess() {
 
     // ⚠️ 只传 id(uuid),不把邮箱塞进 onclick 属性里:邮箱是陌生人自己敲的,
     //    一个带引号的地址就能把这段 HTML 撕开。要用的时候按 id 回表里取。
-    var act = isNew
+    var act = r.status === "new"                    // 等首次登录的行也留着两个按钮(手动开 / 不开照旧能用),状态栏写明「登录即开座」
       ? '<button class="btn"' + actAttr("click", "accessAct", [argStr(r.id), 1]) + '>开名额</button> ' +
         '<button class="btn quiet"' + actAttr("click", "accessAct", [argStr(r.id), 0]) + '>不开</button>'
       : "";
