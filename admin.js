@@ -1,0 +1,2216 @@
+"use strict";
+// ⚠️ 全文不用模板字面量。这份文件历史上住在 TS 模板串里,`${}` 会被外层吃掉;
+//    虽然现在搬出来了,但保持同一纪律 —— 万一有人再把它塞回去,不会静默坏掉。
+var HOST = "https://syebvkwemxwxkonvsyjd.supabase.co";
+var API = HOST + "/functions/v1/murmur";
+var ANON = "sb_publishable_bBmuodbgO72q8CK_kacrSw_0o3cCsOd";
+var SKEY = "murmur.admin.session";
+
+var $ = function (id) { return document.getElementById(id); };
+var esc = function (s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+};
+var usd = function (micro) {
+  var n = Number(micro || 0) / 1e6;
+  if (n === 0) return "$0";
+  if (n < 0.01) return "$" + n.toFixed(4);
+  return "$" + n.toFixed(2);
+};
+var when = function (iso) {
+  if (!iso) return "—";
+  var d = new Date(iso), now = new Date();
+  var mins = Math.round((now - d) / 60000);
+  if (mins < 1) return "刚刚";
+  if (mins < 60) return mins + " 分钟前";
+  if (mins < 60 * 24) return Math.round(mins / 60) + " 小时前";
+  if (mins < 60 * 24 * 30) return Math.round(mins / 1440) + " 天前";
+  return d.toLocaleDateString("zh-CN");
+};
+
+// ── 会话 ──────────────────────────────────────────
+// SEC-M8(2026-10-08):会话(含 refresh token)只放 sessionStorage —— 关掉标签页就没了,也不和同源的别的页面
+//   (azureliu-day1.github.io 下的 day1-app 等)共用一个长期存储。以前放 localStorage:同源任一页面有 XSS 就能偷走管理员凭据。
+// 旧版本留在 localStorage 里的那份,载入时删掉一次(⛔ 不搬进 sessionStorage:旧凭据一律作废,重新收码)。
+try { localStorage.removeItem(SKEY); } catch (e) {}
+function session() { try { return JSON.parse(sessionStorage.getItem(SKEY) || "null"); } catch (e) { return null; } }
+function saveSession(s) { try { sessionStorage.setItem(SKEY, JSON.stringify(s)); } catch (e) {} }
+function clearSession() { try { sessionStorage.removeItem(SKEY); } catch (e) {} }
+function logout() { clearSession(); location.reload(); }
+
+var pendingEmail = "";
+
+function authHeaders() {
+  var s = session();
+  return { "Authorization": "Bearer " + (s && s.access_token), "Content-Type": "application/json" };
+}
+
+// Supabase 有时只回 expires_in(秒),有时两个都回。统一补一个绝对时刻,
+// 否则 boot() 没法判断「这份会话还有多久死」,只能等 401 才知道。
+function stampExpiry(j) {
+  if (j && !j.expires_at && j.expires_in) {
+    j.expires_at = Math.floor(Date.now() / 1000) + Number(j.expires_in);
+  }
+  return j;
+}
+
+// ── 续期 ──────────────────────────────────────────
+// access_token 只活一小时(线上 jwt_exp = 3600)。这一页以前拿到 session 就只
+// 用 access_token —— 过期后 /admin/stats 回 401,于是清会话、回登录页重新收码。
+// refresh_token 一直躺在同一份 session 里,只是从来没人用过。
+//
+// ⚠️ 线上开着 refresh_token_rotation:每续一次,旧的 refresh_token 当场作废、
+//    响应里给一张新的。所以必须把**整份新 session** 存回去 —— 只更新
+//    access_token 的话,下次续期会拿着已作废的旧码去换,400,人照样被踢出去。
+// ⚠️ 同样因为 rotation,两个请求同时 401 时不许各打各的 refresh:第二个拿的是
+//    刚被作废的那张,必 400。所以全局共用一个在飞的 Promise。
+var refreshInflight = null;
+
+function refreshSession(staleToken) {
+  if (refreshInflight) return refreshInflight;         // 已经有人在续了,搭同一班车
+  var s = session();
+  if (!s || !s.refresh_token) return Promise.resolve(false);
+  // 我这个 401 是拿旧 token 发出去的回声,而别人已经续完了 —— 直接重试就行,
+  // 再续一次只是白白转一张新码。
+  if (staleToken && s.access_token && s.access_token !== staleToken) return Promise.resolve(true);
+
+  refreshInflight = fetch(HOST + "/auth/v1/token?grant_type=refresh_token", {
+    method: "POST",
+    headers: { "apikey": ANON, "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: s.refresh_token })
+  }).then(function (r) {
+    if (!r.ok) return false;                            // 400/401 = 这张 refresh 也废了
+    return r.json().then(function (j) {
+      if (!j || !j.access_token || !j.refresh_token) return false;
+      saveSession(stampExpiry(j));
+      return true;
+    });
+  }).catch(function () { return false; })               // 断网也算续不动,不抛给调用方
+    .then(function (ok) { refreshInflight = null; return ok; });
+
+  return refreshInflight;
+}
+
+// 带鉴权的请求统统走这里。⛔ 每个请求最多续一次、最多重试一次:
+// 401 → 续 → 重试 → 还 401,那就是真的没权限(不在管理员名单里了),
+// 把这个 401 原样交回调用方,由它决定是回登录页还是只显示一行错。
+function apiFetch(url, opts) {
+  opts = opts || {};
+  function send(mayRefresh) {
+    // ⚠️ headers 必须在**每次**发之前现算:重试那一发要用刚换回来的新 token,
+    //    把 headers 在外面算好一次会让重试原样再挨一个 401。
+    var s = session();
+    var used = s && s.access_token;
+    var init = { method: opts.method || "GET", headers: authHeaders() };
+    if (opts.headers) Object.keys(opts.headers).forEach(function (k) { init.headers[k] = opts.headers[k]; });   // 如配置写的 x-admin-confirm
+    if (opts.body != null) init.body = opts.body;
+    return fetch(url, init).then(function (r) {
+      if (r.status !== 401 || !mayRefresh) return r;
+      return refreshSession(used).then(function (ok) {
+        return ok ? send(false) : r;                    // 续不动就把原来那个 401 还回去
+      });
+    });
+  }
+  return send(true);
+}
+
+// ── 登录 ──────────────────────────────────────────
+$("send").onclick = function () {
+  var em = $("email").value.trim();
+  if (!em) return;
+  $("gateMsg").innerHTML = '<p class="note">发送中…</p>';
+  fetch(HOST + "/auth/v1/otp", {
+    method: "POST",
+    headers: { "apikey": ANON, "Content-Type": "application/json" },
+    body: JSON.stringify({ email: em, create_user: false })
+  }).then(function (r) {
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    pendingEmail = em;
+    $("step1").classList.add("hidden");
+    $("step2").classList.remove("hidden");
+    $("gateMsg").innerHTML = '<p class="note">信发出去了。邮件里有 6 位码,也有一个按钮链接。</p>';
+  }).catch(function (e) {
+    $("gateMsg").innerHTML = '<p class="err">发不出去(' + esc(e.message) + ')—— 这个邮箱在名单里吗?</p>';
+  });
+};
+
+$("code").oninput = function () { this.value = this.value.replace(/\D/g, "").slice(0, 6); };
+
+function verifyBody(body, fallbacks) {
+  $("gateMsg").innerHTML = '<p class="note">验证中…</p>';
+  fetch(HOST + "/auth/v1/verify", {
+    method: "POST",
+    headers: { "apikey": ANON, "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (res.ok && res.j.access_token) { saveSession(stampExpiry(res.j)); boot(); return; }
+      if (fallbacks && fallbacks.length) { verifyBody(fallbacks[0], fallbacks.slice(1)); return; }
+      $("gateMsg").innerHTML = '<p class="err">验不过 —— 码可能过期了(每个码只活几分钟),重发一次。</p>';
+    }).catch(function (e) {
+      $("gateMsg").innerHTML = '<p class="err">' + esc(e.message) + '</p>';
+    });
+}
+
+$("verify").onclick = function () {
+  var c = $("code").value.trim();
+  if (c.length !== 6) return;
+  verifyBody({ email: pendingEmail, token: c, type: "email" },
+             [{ email: pendingEmail, token: c, type: "magiclink" },
+              { email: pendingEmail, token: c, type: "signup" }]);
+};
+
+$("verifyLink").onclick = function () {
+  var link = $("link").value.trim();
+  var m = link.match(/[?&](?:token_hash|token)=([^&\s]+)/);
+  if (!m) { $("gateMsg").innerHTML = '<p class="err">这不像一条登录链接。</p>'; return; }
+  verifyBody({ token_hash: m[1], type: "magiclink" }, []);
+};
+
+// ── 拉数据 ────────────────────────────────────────
+var DATA = null;
+var ACCESS = null;      // 申请名额那一栏的数据,走自己的路由(见文件末尾 loadAccess)
+
+// 提前 5 分钟就续:卡着点发出去的请求会在路上过期,那时 401 回来虽然也能补救,
+// 但第一屏已经先空白一下了。
+var EXPIRY_SLACK = 300;
+
+function secondsLeft(s) {
+  if (!s || !s.expires_at) return null;   // 没这个字段 = 不知道,交给 401 那条路兜底
+  return Number(s.expires_at) - Math.floor(Date.now() / 1000);
+}
+
+function showGate() { $("gate").classList.remove("hidden"); $("main").classList.add("hidden"); }
+
+function boot() {
+  var s = session();
+  if (!s || !s.access_token) { showGate(); return; }
+  $("gate").classList.add("hidden");
+
+  // 隔一夜再打开 = 一定过期了。先续再拉数据,别让第一屏先红一下再自己好。
+  var left = secondsLeft(s);
+  if (left !== null && left < EXPIRY_SLACK) {
+    refreshSession().then(function (ok) {
+      // 续不动而且已经过期 = 只能重新收码;续不动但还没过期 = 旧 token 还能用,照拉。
+      if (!ok && left <= 0) { clearSession(); showGate(); return; }
+      load();
+    });
+    return;
+  }
+  load();
+}
+
+function load() {
+  $("who").innerHTML = '<span class="muted">加载中…</span>';
+  // 申请名额单独一条路由,和统计**并行**拉:它一挂不该把整页拖住,
+  // 整页慢也不该让「有人在等回音」这件事跟着晚到。
+  loadAccess();
+  loadConfig();          // 配置块同理:自己一条路由,并行拉,挂了不拖整页
+  apiFetch(API + "/admin/stats")
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok) {
+        // 走到这里的 401 已经被 apiFetch 续过一次、重试过一次了 —— 也就是说
+        // refresh_token 也废了(或这个邮箱被移出管理员名单)。这时候才该回登录页。
+        if (res.status === 401) { clearSession(); boot(); return; }
+        var msg = (res.j && res.j.error && res.j.error.message) || ("HTTP " + res.status);
+        $("who").innerHTML = '<span class="err">' + esc(msg) + '</span>';
+        return;
+      }
+      DATA = res.j;
+      $("main").classList.remove("hidden");
+      render();
+    })
+    .catch(function (e) {
+      $("who").innerHTML = '<span class="err">连不上服务器:' + esc(e.message) + '</span>';
+    });
+}
+
+function render() {
+  var d = DATA;
+  $("who").innerHTML =
+    '<span><b>' + esc(d.admin || "") + '</b></span>' +
+    '<span>数据截至 ' + esc(new Date(d.server_time).toLocaleString("zh-CN")) + '</span>' +
+    '<button class="linkbtn" data-click="load">刷新</button>' +
+    '<button class="linkbtn" data-click="logout">退出</button>';
+
+  renderAlarms(d.anomalies || []);
+  renderOverview(d.overview || {});
+  renderUsers();
+  renderFeatures(d.feature_totals || [], d.features || []);
+  renderDaily(d.daily || []);
+  renderUpstream(d);
+  renderPlans(d.plans || []);
+  renderAudit(d.audit || []);
+  renderInvites(d.invites || []);
+  renderProbe(d.invite_attempts);
+  if (CONFIG) renderCfgAudit();   // 配置改动的留痕可能是从 stats 这份里筛的,stats 后到时补画
+}
+
+// ── 异常信号 ──────────────────────────────────────
+function renderAlarms(list) {
+  var extra = [];
+  // 待认领订单也是「钱收了还没落到人头上」,和异常同等级别,放一起
+  (DATA.pending_purchases || []).forEach(function (p) {
+    extra.push({ severity: "medium", signal: "网站订单还没被认领",
+      email: p.email, detail: "订阅号 " + p.external_ref + ",这个邮箱还没在 App 里登录过",
+      hint: "钱收了、人还没对上号:他在网站付了钱,但还没用同一个邮箱在 App 里登录过。" +
+            "他一登录就会自动认领;隔一两天还挂在这,主动去问一句。" });
+  });
+  var all = list.concat(extra);
+  if (!all.length) {
+    $("alarmSec").classList.add("hidden");
+    $("alarms").classList.add("hidden");
+    $("alarmsCalm").classList.add("hidden");
+    return;
+  }
+  $("alarmSec").classList.remove("hidden");
+
+  // ── 降噪:对账已经把没结算的那些按真实用量清零了,钱一分没少 ──────────
+  // 那它就不该是一张红卡 —— 每天开后台第一眼被自己账号的红色吓一跳,
+  // 看三天之后这张卡就不再被看见了,真出事那天也一样没人看。
+  // ⛔ 不删这条警报:它仍然说明 App 的结算路径有洞。只是换个说法和颜色。
+  var byId = {};
+  (DATA.users || []).forEach(function (u) { byId[u.user_id] = u; });
+  function reconciledAway(a) {
+    if (a.signal !== "签了通行证不结算") return false;
+    var u = byId[a.user_id];
+    if (!u) return false;                       // 对不上人 = 不敢降级
+    var unsettled = Number(u.leases_unsettled || 0);
+    return unsettled > 0 && Number(a.reconciled || 0) >= unsettled;
+  }
+  function alarmRow(a) {
+    return '<div class="alarm-row">' +
+      '<span class="sig">' + esc(a.signal) + '</span>' +
+      '<span class="who2 mono">' + esc(a.email || "—") + '</span>' +
+      '<span class="det">' + esc(a.detail || "") + '</span>' +
+      (a.hint ? '<span class="hint">' + esc(a.hint) + '</span>' : "") +
+    '</div>';
+  }
+
+  var calm = all.filter(reconciledAway);
+  var loud = all.filter(function (a) { return !reconciledAway(a); });
+
+  if (loud.length) {
+    var high = loud.some(function (a) { return a.severity === "high"; });
+    $("alarms").className = "card alarm" + (high ? " high" : "");
+    $("alarms").innerHTML = loud.map(alarmRow).join("");
+  } else {
+    $("alarms").className = "card alarm hidden";
+    $("alarms").innerHTML = "";
+  }
+
+  if (calm.length) {
+    $("alarmsCalm").className = "card calmcard";
+    $("alarmsCalm").innerHTML =
+      '<div class="calmhead">对账已经清零的 —— 留个底,不用现在管</div>' +
+      calm.map(alarmRow).join("");
+  } else {
+    $("alarmsCalm").className = "card calmcard hidden";
+    $("alarmsCalm").innerHTML = "";
+  }
+}
+
+// ── 总览 ──────────────────────────────────────────
+function renderOverview(o) {
+  function stat(lbl, num, sub) {
+    return '<div class="card stat"><div class="lbl">' + esc(lbl) + '</div>' +
+           '<div class="num">' + esc(num) + '</div>' +
+           (sub ? '<div class="sub">' + esc(sub) + '</div>' : "") + '</div>';
+  }
+  var mrr = (Number(o.mrr_cents || 0) / 100).toFixed(2);
+  $("overview").innerHTML =
+    stat("用户", o.users || 0, (o.banned ? o.banned + " 个已封禁" : "全部正常")) +
+    stat("今天活跃", o.dau || 0, "7 天 " + (o.wau || 0) + " · 30 天 " + (o.mau || 0)) +
+    stat("档位分布", (o.plan_free || 0) + " / " + (o.plan_pro || 0) + " / " + (o.plan_dev || 0), "免费 / Pro / 开发者") +
+    stat("月流水", "AU$" + mrr, "Stripe 生效订阅") +
+    stat("今天花费", usd(o.spend_today), "30 天 " + usd(o.spend_30d)) +
+    stat("待认领订单", o.pending_claims || 0, o.pending_claims ? "钱收了没落到人头上" : "没有");
+}
+
+// ── 用户表 ────────────────────────────────────────
+var filter = "all", sortKey = "last_seen", sortDir = -1, query = "";
+
+function riskCount(u) {
+  var n = 0;
+  if (u.settle_zero >= 3) n++;
+  if (u.leases_unsettled >= 3) n++;
+  if (u.status !== "active") n++;
+  return n;
+}
+
+function visibleUsers() {
+  var list = (DATA.users || []).slice();
+  if (query) {
+    var q = query.toLowerCase();
+    list = list.filter(function (u) { return String(u.email || "").toLowerCase().indexOf(q) >= 0; });
+  }
+  if (filter === "banned") list = list.filter(function (u) { return u.status !== "active"; });
+  else if (filter === "risk") list = list.filter(function (u) { return riskCount(u) > 0; });
+  else if (filter !== "all") list = list.filter(function (u) { return u.plan === filter; });
+  list.sort(function (a, b) {
+    var x = a[sortKey], y = b[sortKey];
+    if (x == null) return 1; if (y == null) return -1;
+    if (typeof x === "string") return x.localeCompare(y) * sortDir;
+    return (Number(x) - Number(y)) * sortDir;
+  });
+  return list;
+}
+
+// 来源:这个人是怎么进来的。⛔ 不编 —— 审计表里查不到就写「查不到」。
+var SOURCE_LABEL = { invite: "邀请码", access_request: "官网申请", manual: "手动开座" };
+
+function sourceCell(u) {
+  var k = String(u.source_kind || "unknown");
+  if (!SOURCE_LABEL[k]) return '<span class="muted">查不到</span>';
+  return '<span class="chip">' + esc(SOURCE_LABEL[k]) + "</span>" +
+         (u.source_ref ? '<div class="muted src mono mob-hide">' + esc(u.source_ref) + "</div>" : "");
+}
+
+function shortDate(iso) {
+  if (!iso) return "";
+  var d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : d.toLocaleDateString("zh-CN");
+}
+
+// 「一次都没听写过」和「不知道」是两件事。服务端扫到上限时会回
+// lifecycle_truncated:true,那时空值只代表**没查到**,不许印成「没有」。
+function firstDictCell(u) {
+  var t = shortDate(u.first_dictation);
+  if (t) return esc(t);
+  return (DATA && DATA.lifecycle_truncated)
+    ? '<span class="muted" title="这一批没扫到,不代表没有">?</span>'
+    : '<span class="muted">没有</span>';
+}
+
+function renderUsers() {
+  var list = visibleUsers();
+  $("userCount").textContent = list.length + " / " + (DATA.users || []).length + " 人";
+  // 列序 = 一个人的故事:谁 → 从哪来 → 什么档位 → 什么状态 → 用了多少 →
+  // 第一次真的用是什么时候 → 最近还在不在。
+  // mob-hide = 手机上不画(≤520px):用量三列和「最后登录」在手机上扫不动,
+  // 而「来源 / 首次听写」是这一版存在的理由,手机上必须留着。
+  // ⚠️ 前六列 = 一个人的故事,而且必须排在**用量三列之前**:实测(measureW)
+  //    这张表在 1024 宽就已经比容器宽了(老版本 942 刚好放下、新版本 1054),
+  //    排在后面的列在笔记本上要横着滚才看得见 —— 那就等于没加。
+  var cols = [
+    ["email", "邮箱", ""], ["source_kind", "来源", ""],
+    ["plan", "档位", "mob-hide"], ["status", "状态", ""],
+    ["first_dictation", "首次听写", ""], ["last_seen", "最后活动", ""],
+    ["used_micro", "本月花费", "num mob-hide"], ["used_requests", "请求", "num mob-hide"],
+    ["chars_week", "本周字数", "num mob-hide"], ["lecture_minutes_month", "长录音", "num mob-hide"],
+    ["last_login", "最后登录", "mob-hide"]
+  ];
+  var head = "<thead><tr>" + cols.map(function (c) {
+    var arrow = sortKey === c[0] ? '<span class="arrow">' + (sortDir < 0 ? "▼" : "▲") + "</span>" : "";
+    return '<th class="sortable ' + c[2] + '" data-k="' + c[0] + '">' + c[1] + " " + arrow + "</th>";
+  }).join("") + '<th class="mob-hide"></th></tr></thead>';
+
+  var body = list.map(function (u) {
+    var cap = Number(u.quota_micro || 0);
+    var used = Number(u.used_micro || 0);
+    var pct = cap > 0 ? Math.min(used / cap, 1.2) : 0;
+    var cls = pct >= 1 ? "over" : (pct > 0.8 ? "hot" : "");
+    var risk = riskCount(u);
+    return '<tr class="clickable" data-id="' + esc(u.user_id) + '">' +
+      "<td>" + esc(u.email) + "</td>" +
+      "<td>" + sourceCell(u) + "</td>" +
+      '<td class="mob-hide"><span class="chip ' + (u.plan === "pro" ? "pro" : u.plan === "developer" ? "dev" : "") + '">' + esc(u.plan) + "</span></td>" +
+      "<td>" + (u.status === "active"
+        ? '<span class="chip ok">正常</span>'
+        : '<span class="chip banned">' + esc(u.status) + "</span>") +
+        (risk ? ' <span class="chip risk">⚠ ' + risk + "</span>" : "") + "</td>" +
+      "<td>" + firstDictCell(u) + "</td>" +
+      "<td>" + esc(when(u.last_seen)) + "</td>" +
+      '<td class="num mob-hide">' + esc(usd(used)) +
+        (cap > 0 ? ' <span class="bar-track"><span class="bar-fill ' + cls + '" data-style="width:' + (pct * 100).toFixed(0) + '%"></span></span>' : "") + "</td>" +
+      '<td class="num mob-hide">' + esc(u.used_requests || 0) + " / " + esc(u.quota_requests || 0) + "</td>" +
+      '<td class="num mob-hide">' + esc(u.chars_week || 0) + "</td>" +
+      '<td class="num mob-hide">' + esc(u.lecture_minutes_month || 0) + " 分</td>" +
+      '<td class="mob-hide">' + esc(when(u.last_login)) + "</td>" +
+      '<td class="muted mob-hide">›</td></tr>';
+  }).join("");
+
+  // ⚠️ colspan 跟着列数算,不写死:上一版写死 9 而实际有 10 列,
+  //    「没有匹配的用户」那一行短一格 —— 加了两列之后会更明显。
+  $("users").innerHTML = head + "<tbody>" +
+    (body || '<tr><td colspan="' + (cols.length + 1) + '" class="muted">没有匹配的用户</td></tr>') +
+    "</tbody>";
+
+  Array.prototype.forEach.call($("users").querySelectorAll("th.sortable"), function (th) {
+    th.onclick = function () {
+      var k = th.getAttribute("data-k");
+      if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = -1; }
+      renderUsers();
+    };
+  });
+  Array.prototype.forEach.call($("users").querySelectorAll("tr.clickable"), function (tr) {
+    tr.onclick = function () { openDrawer(tr.getAttribute("data-id")); };
+  });
+}
+
+$("q").oninput = function () { query = this.value.trim(); renderUsers(); };
+Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (b) {
+  b.onclick = function () {
+    Array.prototype.forEach.call(document.querySelectorAll(".tab"), function (x) { x.classList.remove("on"); });
+    b.classList.add("on"); filter = b.getAttribute("data-f"); renderUsers();
+  };
+});
+
+// ── 用户抽屉:详情 + 写操作 ───────────────────────
+function openDrawer(id) {
+  var u = (DATA.users || []).filter(function (x) { return x.user_id === id; })[0];
+  if (!u) return;
+  var cap = Number(u.quota_micro || 0);
+  function kv(k, v) { return '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v">' + v + "</span></div>"; }
+
+  $("drawer").innerHTML =
+    '<div class="row" data-style="justify-content:space-between;margin-bottom:14px">' +
+      "<h3>" + esc(u.email) + "</h3>" +
+      '<button class="linkbtn" data-click="closeDrawer">关闭</button></div>' +
+
+    kv("用户 id", '<span class="mono">' + esc(u.user_id) + "</span>") +
+    kv("档位", esc(u.plan) + (u.subscription ? ' <span class="muted">(' + esc(u.subscription) + ")</span>" : "")) +
+    kv("状态", u.status === "active" ? '<span class="chip ok">正常</span>' : '<span class="chip banned">' + esc(u.status) + "</span>") +
+    kv("加入", esc(new Date(u.joined).toLocaleDateString("zh-CN"))) +
+    kv("最后活动", esc(when(u.last_seen))) +
+    kv("最后登录", esc(when(u.last_login))) +
+    kv("本月花费", esc(usd(u.used_micro)) + (cap ? " / " + esc(usd(cap)) : "")) +
+    kv("本月请求", esc(u.used_requests || 0) + " / " + esc(u.quota_requests || 0)) +
+    kv("本周字数", esc(u.chars_week || 0)) +
+    kv("本月长录音", esc(u.lecture_minutes_month || 0) + " 分钟") +
+    kv("签发通行证", esc(u.leases_total || 0) + " 次") +
+    kv("其中没结算", (u.leases_unsettled >= 3 ? '<span class="chip risk">' : "<span>") + esc(u.leases_unsettled || 0) + " 次</span>") +
+    kv("结算报零用量", (u.settle_zero >= 3 ? '<span class="chip risk">' : "<span>") + esc(u.settle_zero || 0) + " 次</span>") +
+
+    // 时间线:走到哪一步了。数据是抽屉打开时才去问的一条**只读**路由
+    // (/admin/users/timeline)—— 列表页有多少人就不该打多少次明细。
+    '<div class="act"><h4>生命周期</h4><div id="tlBox"><p class="note">读取中…</p></div></div>' +
+
+    '<div class="act"><h4>封禁</h4>' +
+      '<input id="banReason" type="text" placeholder="理由(必填 —— 三个月后翻记录时只剩它)">' +
+      '<div class="row">' +
+        (u.status === "active"
+          ? '<button class="btn danger"' + actAttr("click", "doAction", ["ban", argStr(u.user_id)]) + '>封禁</button>'
+          : '<button class="btn"' + actAttr("click", "doAction", ["unban", argStr(u.user_id)]) + '>解封</button>') +
+      "</div>" +
+      '<p class="note">封禁立刻生效于所有接口 —— 鉴权那一层本来就在查这个状态。</p>' +
+    "</div>" +
+
+    '<div class="act"><h4>单独加额度(小灶)</h4>' +
+      '<input id="qMicro" type="number" min="0" step="100000" value="' + esc(cap) + '" placeholder="微美元">' +
+      '<input id="qReq" type="number" min="0" step="100" value="' + esc(u.quota_requests || 0) + '" placeholder="请求数">' +
+      '<input id="qReason" type="text" placeholder="理由">' +
+      '<button class="btn quiet"' + actAttr("click", "doAction", ["set_quota", argStr(u.user_id)]) + '>保存</button>' +
+      '<p class="note">这是<b>往上加</b>的口子。花钱闸取「档位帽 vs 这里」更宽松的那个,' +
+        "所以调低它压不下付费用户的天花板 —— 要降档请改下面的档位。</p>" +
+    "</div>" +
+
+    '<div class="act"><h4>手动给/收档位</h4>' +
+      '<select id="pPlan"><option value="free">free(收回)</option>' +
+        '<option value="pro">pro</option><option value="developer">developer</option></select>' +
+      '<input id="pMonths" type="number" min="0" step="1" value="0" placeholder="几个月(0 = 不设到期)">' +
+      '<input id="pReason" type="text" placeholder="理由">' +
+      '<button class="btn quiet"' + actAttr("click", "doAction", ["set_plan", argStr(u.user_id)]) + '>应用</button>' +
+      '<p class="note">走订阅表、来源标 manual —— Stripe 的一次退订不会顺手把手动给的档压掉。</p>' +
+    "</div>" +
+
+    '<div id="drawerMsg"></div>';
+
+  $("drawer").style.display = "block";
+  $("scrim").style.display = "block";
+  loadTimeline(u.user_id);
+}
+
+// ── 生命周期:开座 → 首次登录 → 首次听写 → 最近活跃 ───────────────────
+// ⚠️ tlSeq:抽屉可以被连着点开三个人,慢的那条响应不许把新抽屉画花。
+//    关抽屉也要 ++ —— 不然它会画进一个已经关掉(但 DOM 还在)的 #tlBox。
+var tlSeq = 0;
+
+function tlRow(step, iso, seat) {
+  if (!iso) {
+    return '<div class="tl-row"><span class="step">' + esc(step) + "</span>" +
+           '<span class="muted">没有记录</span><span class="day"></span></div>';
+  }
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) {
+    return '<div class="tl-row"><span class="step">' + esc(step) + "</span>" +
+           '<span class="muted">没有记录</span><span class="day"></span></div>';
+  }
+  var day = "";
+  if (seat && !isNaN(seat.getTime())) {
+    var n = Math.round((d.getTime() - seat.getTime()) / 86400000);
+    day = "第 " + (n < 0 ? 0 : n) + " 天";
+  }
+  return '<div class="tl-row"><span class="step">' + esc(step) + "</span>" +
+         "<span>" + esc(d.toLocaleDateString("zh-CN")) + "</span>" +
+         '<span class="day">' + esc(day) + "</span></div>";
+}
+
+function timelineHTML(t) {
+  var seat = t.seat_at ? new Date(t.seat_at) : null;
+  var tt = t.totals || {}, lz = t.leases || {};
+  var n = function (x) { return Number(x || 0); };
+  var src = t.source || {};
+  var srcTxt = SOURCE_LABEL[String(src.kind || "")] || "查不到";
+  if (src.ref) srcTxt += " " + src.ref;
+
+  return tlRow("开座", t.seat_at, seat) +
+    tlRow("首次登录", t.first_login, seat) +
+    tlRow("首次听写", t.first_dictation, seat) +
+    tlRow("最近活跃", t.last_seen, seat) +
+    '<div class="tl-sum">听写 ' + esc(n(tt.dictation)) + " 次 · 长录音 " + esc(n(tt.lecture)) +
+      " 次 · 随心问 " + esc(n(tt.ask)) + " 次 · 通行证 " + esc(n(lz.total)) +
+      " 张(结算 " + esc(n(lz.settled)) + " / 对账清零 " + esc(n(lz.reconciled)) + ")</div>" +
+    '<div class="tl-sum">来源:' + esc(srcTxt) + "</div>";
+}
+
+function loadTimeline(id) {
+  var mine = ++tlSeq;
+  apiFetch(API + "/admin/users/timeline?user_id=" + encodeURIComponent(id))
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+    .then(function (res) {
+      if (mine !== tlSeq) return;
+      var box = $("tlBox");
+      if (!box) return;
+      if (!res.ok) {
+        var msg = (res.j && res.j.error && res.j.error.message) || ("HTTP " + res.status);
+        box.innerHTML = '<p class="err">时间线没读出来:' + esc(msg) + "</p>";
+        return;
+      }
+      box.innerHTML = timelineHTML(res.j);
+    })
+    .catch(function (e) {
+      if (mine !== tlSeq) return;
+      var box = $("tlBox");
+      if (box) box.innerHTML = '<p class="err">时间线没读出来:' + esc(e.message) + "</p>";
+    });
+}
+
+function closeDrawer() { tlSeq++; $("drawer").style.display = "none"; $("scrim").style.display = "none"; }
+$("scrim").onclick = closeDrawer;
+document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeDrawer(); });
+
+function doAction(action, userId) {
+  var body = { action: action, user_id: userId };
+  if (action === "ban") { body.status = "banned"; body.reason = ($("banReason") || {}).value || ""; }
+  if (action === "unban") { body.status = "active"; body.reason = ($("banReason") || {}).value || "解封"; }
+  if (action === "set_quota") {
+    body.micro = Number(($("qMicro") || {}).value || 0);
+    body.requests = Number(($("qReq") || {}).value || 0);
+    body.reason = ($("qReason") || {}).value || "";
+  }
+  if (action === "set_plan") {
+    body.plan = ($("pPlan") || {}).value;
+    body.months = Number(($("pMonths") || {}).value || 0);
+    body.reason = ($("pReason") || {}).value || "";
+  }
+  $("drawerMsg").innerHTML = '<p class="note">执行中…</p>';
+  apiFetch(API + "/admin/action", { method: "POST", body: JSON.stringify(body) })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || (res.j && res.j.ok === false)) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("drawerMsg").innerHTML = '<p class="err">' + esc(m) + "</p>";
+        return;
+      }
+      $("drawerMsg").innerHTML = '<p class="okmsg">done。正在刷新…</p>';
+      closeDrawer(); load();
+    })
+    .catch(function (e) { $("drawerMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+// ── 功能使用 ──────────────────────────────────────
+var FEAT_NAME = { dictation: "听写", polish: "整理", ask: "随心问", lecture: "长录音" };
+var FEAT_COLOR = { dictation: "var(--coral)", polish: "var(--llm)", ask: "var(--green)", lecture: "var(--warn)" };
+
+function renderFeatures(totals, daily) {
+  if (!totals.length) {
+    $("featRank").innerHTML = '<p class="muted">30 天内还没有经过服务器的功能使用。</p>';
+  } else {
+    var max = Math.max.apply(null, totals.map(function (t) { return Number(t.count); }));
+    $("featRank").innerHTML = totals.map(function (t) {
+      var w = max > 0 ? (Number(t.count) / max * 100) : 0;
+      return '<div class="rank-row">' +
+        "<span>" + esc(FEAT_NAME[t.feature] || t.feature) + "</span>" +
+        '<span class="rank-bar" data-style="width:' + w.toFixed(1) + "%;background:" + (FEAT_COLOR[t.feature] || "var(--coral)") + '"></span>' +
+        '<span class="n">' + esc(t.count) + " 次 · " + esc(t.users) + " 人</span></div>";
+    }).join("");
+  }
+  drawFeatChart(daily);
+}
+
+// 每天各功能次数:堆叠柱。手写 SVG,不引任何图表库(零依赖是这个页面的纪律)
+function drawFeatChart(rows) {
+  var svg = $("featChart"), tip = $("featTip");
+  var W = svg.clientWidth || 600, H = 150, PAD = 22;
+  var days = [], byDay = {};
+  rows.forEach(function (r) {
+    if (!byDay[r.day]) { byDay[r.day] = {}; days.push(r.day); }
+    byDay[r.day][r.feature] = Number(r.count);
+  });
+  days.sort();
+  var kinds = ["dictation", "polish", "ask", "lecture"];
+  $("featLegend").innerHTML = kinds.map(function (k) {
+    return '<span><i class="key" data-style="background:' + FEAT_COLOR[k] + '"></i>' + FEAT_NAME[k] + "</span>";
+  }).join("");
+  if (!days.length) { svg.innerHTML = '<text x="10" y="24" fill="var(--faint)" font-size="12">还没有数据</text>'; return; }
+
+  var maxTotal = 1;
+  days.forEach(function (d) {
+    var s = kinds.reduce(function (a, k) { return a + (byDay[d][k] || 0); }, 0);
+    if (s > maxTotal) maxTotal = s;
+  });
+  var bw = Math.max(2, (W - PAD * 2) / days.length - 2);
+  var out = "";
+  days.forEach(function (d, i) {
+    var x = PAD + i * ((W - PAD * 2) / days.length);
+    var y = H - PAD;
+    kinds.forEach(function (k) {
+      var v = byDay[d][k] || 0;
+      if (!v) return;
+      var h = (v / maxTotal) * (H - PAD * 2);
+      y -= h;
+      out += '<rect x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) +
+             '" height="' + h.toFixed(1) + '" fill="' + FEAT_COLOR[k] + '" opacity=".85" rx="1"></rect>';
+    });
+  });
+  out += '<text x="' + PAD + '" y="' + (H - 4) + '" fill="var(--faint)" font-size="10">' + days[0] + "</text>";
+  out += '<text x="' + (W - PAD) + '" y="' + (H - 4) + '" fill="var(--faint)" font-size="10" text-anchor="end">' + days[days.length - 1] + "</text>";
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.innerHTML = out;
+
+  svg.onmousemove = function (e) {
+    var rect = svg.getBoundingClientRect();
+    var i = Math.floor((e.clientX - rect.left - PAD) / ((W - PAD * 2) / days.length));
+    if (i < 0 || i >= days.length) { tip.style.display = "none"; return; }
+    var d = days[i], lines = [d];
+    kinds.forEach(function (k) { if (byDay[d][k]) lines.push(FEAT_NAME[k] + " " + byDay[d][k] + " 次"); });
+    tip.textContent = lines.join("\n");
+    tip.style.left = (e.clientX - rect.left) + "px";
+    tip.style.top = (e.clientY - rect.top) + "px";
+    tip.style.display = "block";
+  };
+  svg.onmouseleave = function () { tip.style.display = "none"; };
+}
+
+// ── 每日花费(双系列)─────────────────────────────
+function drawLine(pts, W, H, PAD, max, color) {
+  if (pts.length < 2) return "";
+  var d = pts.map(function (p, i) {
+    var x = PAD + (i / (pts.length - 1)) * (W - PAD * 2);
+    var y = H - PAD - (p / max) * (H - PAD * 2);
+    return (i ? "L" : "M") + x.toFixed(1) + "," + y.toFixed(1);
+  }).join(" ");
+  return '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round"></path>';
+}
+
+function renderDaily(rows) {
+  var svg = $("dailyChart"), tip = $("dailyTip");
+  var W = svg.clientWidth || 500, H = 170, PAD = 20;
+  if (!rows.length) { svg.innerHTML = '<text x="10" y="24" fill="var(--faint)" font-size="12">还没有数据</text>'; return; }
+  var asr = rows.map(function (r) { return Number(r.asr_micro || 0); });
+  var llm = rows.map(function (r) { return Number(r.llm_micro || 0); });
+  var max = Math.max(1, Math.max.apply(null, asr.concat(llm)));
+  svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+  svg.innerHTML =
+    '<line x1="' + PAD + '" y1="' + (H - PAD) + '" x2="' + (W - PAD) + '" y2="' + (H - PAD) + '" stroke="var(--line)"></line>' +
+    drawLine(asr, W, H, PAD, max, "var(--asr)") +
+    drawLine(llm, W, H, PAD, max, "var(--llm)") +
+    '<text x="' + PAD + '" y="14" fill="var(--faint)" font-size="10">峰值 ' + usd(max) + "</text>";
+
+  svg.onmousemove = function (e) {
+    var rect = svg.getBoundingClientRect();
+    var i = Math.round((e.clientX - rect.left - PAD) / (W - PAD * 2) * (rows.length - 1));
+    if (i < 0 || i >= rows.length) { tip.style.display = "none"; return; }
+    var r = rows[i];
+    tip.textContent = r.day + "\n识别 " + usd(r.asr_micro) + "\n大模型 " + usd(r.llm_micro) +
+                      "\n" + (r.requests || 0) + " 次 · " + (r.active_users || 0) + " 人";
+    tip.style.left = (e.clientX - rect.left) + "px";
+    tip.style.top = (e.clientY - rect.top) + "px";
+    tip.style.display = "block";
+  };
+  svg.onmouseleave = function () { tip.style.display = "none"; };
+}
+
+// ── 上游 API ──────────────────────────────────────
+function renderUpstream(d) {
+  var a = d.apis || {};
+  var out = "";
+  function row(k, v, warn) {
+    return '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v' + (warn ? " err" : "") + '">' + v + "</span></div>";
+  }
+  var ds = a.deepseek || {};
+  if (!ds.configured) out += row("DeepSeek", '<span class="muted">没配 Key</span>', true);
+  else if (!ds.ok) out += row("DeepSeek", esc(ds.detail || "探测失败"), true);
+  else out += row("DeepSeek 余额", (ds.balances || []).map(function (b) { return esc(b.total + " " + b.currency); }).join(" · ") || "—");
+
+  var sx = a.soniox || {};
+  if (!sx.configured) out += row("Soniox", '<span class="muted">没配 Key</span>', true);
+  else if (!sx.ok) out += row("Soniox", esc(sx.detail || "探测失败"), true);
+  else {
+    out += row("Soniox 本月", "$" + Number(sx.month_cost_usd || 0).toFixed(4));
+    (sx.models || []).forEach(function (m) {
+      out += row("　" + m.model, esc(m.requests + " 次 · " + m.audio_minutes + " 分钟 · $" + Number(m.cost_usd).toFixed(4)));
+    });
+  }
+  out += row("用量对账水位", '<span class="mono">' + esc(when(d.reconcile_watermark)) + "</span>");
+  out += '<div class="row" data-style="margin-top:12px">' +
+         '<button class="btn quiet" data-click="reconcile" data-args="[0]">试算(不动账)</button>' +
+         '<button class="btn quiet" data-click="reconcile" data-args="[1]">应用</button></div>' +
+         '<p class="note">不信客户端自报,直接问 Soniox 那一单实际处理了多少音频。' +
+         '日常在报账那条路上自己跑(至少隔 10 分钟一次),这两个按钮是排障用的。</p>' +
+         '<div id="recMsg"></div>';
+  $("upstream").innerHTML = out;
+}
+
+// ── 用量对账 ──────────────────────────────────────
+function reconcile(apply) {
+  $("recMsg").innerHTML = '<p class="note">跑对账中…(要翻 Soniox 的用量日志,可能几秒)</p>';
+  // 试算回看 30 天 —— 排障要看的窗口和水位无关
+  var url = API + "/asr/reconcile?" + (apply ? "apply=1" : "days=30");
+  apiFetch(url, { method: "POST" })
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.detail)) || "没跑通";
+        $("recMsg").innerHTML = '<p class="err">' + esc(m) + "</p>";
+        return;
+      }
+      var j = res.j;
+      var lines = [
+        "窗口 " + String(j.window.start).slice(0, 16) + " → " + String(j.window.end).slice(0, 16),
+        "Soniox 日志 " + j.logs_total + " 条,其中贴了我们标的 " + j.logs_ours + " 条",
+        (apply ? "已调账 " : "会调账 ") + j.adjusted + " 笔"
+      ];
+      if (j.adjustments && j.adjustments.length) {
+        lines.push("");
+        j.adjustments.slice(0, 10).forEach(function (a) {
+          lines.push("  " + a.lease.slice(0, 8) + "…  真实 " + usd(a.true_micro) +
+                     (apply ? "  调整 " + (a.delta > 0 ? "+" : "") + usd(a.delta) : ""));
+        });
+      }
+      $("recMsg").innerHTML = '<pre class="note" data-style="white-space:pre-wrap;margin-top:8px">' +
+                              esc(lines.join("\n")) + "</pre>";
+      if (apply) load();
+    })
+    .catch(function (e) { $("recMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+// ── 档位 / 留痕 ───────────────────────────────────
+function renderPlans(plans) {
+  $("plans").innerHTML =
+    "<thead><tr><th>档位</th><th class='num'>周字数</th><th class='num'>长录音</th><th class='num'>成本帽</th><th class='num'>月价</th></tr></thead><tbody>" +
+    plans.map(function (p) {
+      return "<tr><td>" + esc(p.name) + ' <span class="muted mono">' + esc(p.key) + "</span></td>" +
+        '<td class="num">' + (p.weekly_chars == null ? "不限" : esc(p.weekly_chars)) + "</td>" +
+        '<td class="num">' + (p.lecture_minutes == null ? "不限" : esc(p.lecture_minutes) + " 分") + "</td>" +
+        '<td class="num">' + (p.cost_cap_micro == null ? "不限" : esc(usd(p.cost_cap_micro))) + "</td>" +
+        '<td class="num">' + (p.price_cents ? "AU$" + (p.price_cents / 100).toFixed(2) : "—") + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+function renderAudit(rows) {
+  if (!rows.length) { $("audit").innerHTML = '<tbody><tr><td class="muted">还没有后台操作。</td></tr></tbody>'; return; }
+  $("audit").innerHTML =
+    "<thead><tr><th>时间</th><th>操作人</th><th>动作</th><th>对象</th><th>变化</th><th>理由</th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      var chg = "";
+      try {
+        var b = r.before || {}, a2 = r.after || {};
+        chg = Object.keys(a2).map(function (k) { return k + ": " + (b[k] == null ? "—" : b[k]) + " → " + a2[k]; }).join("; ");
+      } catch (e) {}
+      return "<tr><td>" + esc(when(r.at)) + "</td><td>" + esc(r.actor) + "</td>" +
+        "<td>" + esc(r.action) + "</td><td>" + esc(r.target || "—") + "</td>" +
+        '<td class="mono">' + esc(chg) + "</td><td>" + esc(r.reason || "—") + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+window.addEventListener("resize", function () {
+  if (DATA) { drawFeatChart(DATA.features || []); renderDaily(DATA.daily || []); }
+});
+
+boot();
+
+// ── 邀请:开座 + 铸码(2026-08-31)────────────────────────────────────
+function grantSeat() {
+  var email = ($("seatEmail").value || "").trim();
+  if (!email) { $("seatMsg").innerHTML = '<p class="err">把邮箱填上</p>'; return; }
+  $("seatMsg").innerHTML = '<p class="note">开着…</p>';
+  apiFetch(API + "/admin/action", {
+    method: "POST",
+    body: JSON.stringify({ action: "grant_seat", email: email,
+                           reason: ($("seatReason").value || "").trim() })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("seatMsg").innerHTML = '<p class="err">' + esc(m) + "</p>"; return;
+      }
+      // ⛔ 别再无条件说「信也发出去了」。服务端如实回 mailed(index.ts grant_seat 那支),
+      //    这里以前不读它 —— 于是信一封没发,页面照样说发了,人就静悄悄掉了。
+      // ⚠️ 而且 mailed:true 也只代表 Resend **收下了**,不代表送到:2026-09-11 实测
+      //    同一条路上多封信 HTTP 200 + id 却从没进收件箱(发信域没有投递信誉,查不到日志)。
+      //    所以即使 true 也要提醒管理员自己再通知一声 —— 开座这条路没有第二个触达手段。
+      var seatWho = esc(res.j.email);
+      var seatMsg;
+      if (res.j.existed) {
+        seatMsg = '<p class="okmsg">' + seatWho + ' 本来就有名额,已确保是 active</p>';
+      } else if (res.j.mailed === false) {
+        seatMsg = '<p class="okmsg">' + seatWho + ' 的名额开好了。</p>' +
+                  '<p class="err">但通知信<b>没发出去</b> —— 他不会知道,你得自己告诉他。</p>';
+      } else {
+        seatMsg = '<p class="okmsg">' + seatWho + ' 的名额开好了,通知信已提交给邮件服务。</p>' +
+                  '<p class="note">⚠️ 提交成功不等于送达(这条路目前投递不稳)。' +
+                  '稳妥起见自己也说一声:让他打开 Murmur → 登录 → 填这个邮箱,验证码那封信是可靠的。</p>';
+      }
+      $("seatMsg").innerHTML = seatMsg;
+      $("seatEmail").value = ""; $("seatReason").value = "";
+      load();
+    })
+    .catch(function (e) { $("seatMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+function mintInvite() {
+  $("invMsg").innerHTML = '<p class="note">铸着…</p>';
+  apiFetch(API + "/admin/action", {
+    method: "POST",
+    body: JSON.stringify({ action: "mint_invite",
+                           max_uses: Number($("invUses").value || 1),
+                           days: Number($("invDays").value || 0),
+                           note: ($("invNote").value || "").trim() })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("invMsg").innerHTML = '<p class="err">' + esc(m) + "</p>"; return;
+      }
+      // ⚠️ 明文只此一次 —— 给个大字号、可以整段选,并且明说关掉就没了
+      $("invMsg").innerHTML =
+        '<p class="okmsg">铸好了。<b>这串只显示这一次</b>,现在就复制走:</p>' +
+        '<p data-style="font-size:20px;font-family:ui-monospace,monospace;user-select:all;' +
+        'padding:10px;border:1px dashed currentColor;border-radius:8px">' + esc(res.j.code) + "</p>";
+      load();
+    })
+    .catch(function (e) { $("invMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+function renderInvites(rows) {
+  if (!rows.length) {
+    // 「一张都没铸过」和「铸过、但现在一张可用的都没有」是两件完全不同的处境:
+    // 前者是还没开始发码,后者是全用完 / 作废 / 过期了。同一句话会让人以为
+    // 自己从来没发过码 —— 而历史其实在下面的操作留痕里躺着。
+    var att = DATA && DATA.invite_attempts;
+    var everMinted = false;
+    if (att && (((att.recent || []).length > 0) || Number(att.last_24h || 0) > 0)) everMinted = true;
+    if (!everMinted) {
+      var log = (DATA && DATA.audit) || [];
+      everMinted = log.some(function (a) { return a.action === "mint_invite"; });
+    }
+    $("invites").innerHTML = '<tbody><tr><td class="muted">' +
+      (everMinted ? "现在没有可用的码(历史在下面的操作留痕里)。" : "还没铸过邀请码。") +
+      "</td></tr></tbody>";
+    return;
+  }
+  $("invites").innerHTML =
+    "<thead><tr><th>码</th><th>用量</th><th>过期</th><th>备注</th><th>谁换走的</th><th></th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      var used = r.used + " / " + r.max_uses;
+      var dead = r.revoked_at || (r.expires_at && new Date(r.expires_at) < new Date())
+                 || r.used >= r.max_uses;
+      var state = r.revoked_at ? "已作废"
+        : (r.expires_at && new Date(r.expires_at) < new Date()) ? "已过期"
+        : (r.used >= r.max_uses) ? "用完了" : "可用";
+      // 谁换走的 —— 「这张码放进来的都是谁」以前完全看不见
+      var who = (r.claimed_by || []).map(function (c) { return esc(c.email); }).join("<br>") || '<span class="muted">—</span>';
+      // 作废只对还活着的码给按钮:已经废了/用完了/过期了的再点没有意义
+      var act = dead ? "" :
+        '<button class="btn quiet"' + actAttr("click", "revokeInvite", [argStr(r.hash), argStr(r.prefix)]) + '>作废</button>';
+      return "<tr><td><code>" + esc(r.prefix) + "…</code></td>" +
+        "<td>" + esc(used) + " · " + esc(state) + "</td>" +
+        "<td>" + esc(r.expires_at ? r.expires_at.slice(0, 10) : "永不") + "</td>" +
+        "<td>" + esc(r.note || "") + "</td>" +
+        "<td data-style=\"font-size:12px\">" + who + "</td>" +
+        "<td>" + act + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+/// 作废一张码。⚠️ 这是**止血不是追溯** —— 已经用它换走名额的人不受影响,
+/// 那些要单独封禁(封禁有它自己的理由字段和审计条目)。
+function revokeInvite(hash, prefix) {
+  var reason = prompt("作废 " + prefix + "…\n\n为什么废?(三个月后翻审计表时,这是唯一救得回来的信息)");
+  if (reason === null) return;
+  if (!reason.trim()) { alert("作废要写理由"); return; }
+  apiFetch(API + "/admin/action", {
+    method: "POST",
+    body: JSON.stringify({ action: "revoke_invite", hash: hash, reason: reason.trim() })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        alert((res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功"); return;
+      }
+      alert("已作废。这张码之前已经换走 " + (res.j.already_used || 0) +
+            " 个名额 —— 那些人不受影响,要收回得单独封禁。");
+      load();
+    })
+    .catch(function (e) { alert(e.message); });
+}
+
+// 兑换尝试表里的 ip 自 2026-09-26(P13)起存的是 hmac(IP) 的 64 位十六进制,不再是明文。
+// 整串摆出来又长又没法读 → 只显示前 8 位 + 「…」;悬停(title)看全串,点一下在短 / 全之间切(对照、复制时用)。
+// 短值(「—」、万一还有的旧明文)原样显示,不截。
+var shortHash = function (s) {
+  var full = String(s == null ? "" : s);
+  if (full.length <= 12) return "<code>" + esc(full || "—") + "</code>";
+  var short = full.slice(0, 8) + "…";
+  return '<code class="hash" title="' + esc(full) + '" data-full="' + esc(full) + '" data-short="' + esc(short) +
+         '" data-click="toggleHash" data-this="1">' + esc(short) + "</code>";
+};
+function cfgTierClose() { cfgTierCur = ""; $("cfgTierForm").innerHTML = ""; }
+function cfgProvClose() { cfgProvCur = null; $("cfgProvForm").innerHTML = ""; }
+function toggleHash(el) {
+  var full = el.getAttribute("data-full");
+  el.textContent = el.textContent === full ? el.getAttribute("data-short") : full;
+}
+
+/// 有人在探码 —— 这块以前完全看不见
+function renderProbe(p) {
+  if (!p) { $("probe").innerHTML = '<p class="note">没有数据。</p>'; return; }
+  var sus = p.suspicious || [];
+  var html = '<p class="note">过去 24 小时:兑换尝试 <b>' + (p.last_24h || 0) +
+             '</b> 次,其中失败 <b>' + (p.failed_24h || 0) + '</b> 次。</p>';
+  if (!sus.length) {
+    html += '<p class="note">没有可疑 IP(同一个 IP 24 小时内失败 ≥5 次才会列在这)。</p>';
+  } else {
+    html += '<div class="tablebox"><table><thead><tr><th>IP</th><th>失败次数</th><th>最近一次</th></tr></thead><tbody>' +
+      sus.map(function (r) {
+        return "<tr><td>" + shortHash(r.ip) + "</td><td>" + esc(r.fails) +
+               "</td><td>" + esc((r.last || "").slice(0, 16).replace("T", " ")) + "</td></tr>";
+      }).join("") + "</tbody></table></div>";
+  }
+  // 2026-09-13:24 小时计数会归零,底表逐条才是「谁码填错了、谁想蹭」的答案
+  var rec = p.recent || [];
+  if (rec.length) {
+    html += '<table class="mini"><thead><tr><th>时间</th><th>邮箱</th><th>码前缀</th><th>结果</th><th>IP</th></tr></thead><tbody>';
+    rec.forEach(function (r) {
+      var bad = r.outcome !== "ok" && r.outcome !== "ok_nomail";
+      html += "<tr" + (bad ? ' class="bad"' : "") + "><td>" + esc(when(r.at)) + "</td><td>" + esc(r.email || "—") +
+              "</td><td>" + esc(r.prefix || "—") + "</td><td>" + esc(r.outcome) + "</td><td>" + (r.ip ? shortHash(r.ip) : "—") + "</td></tr>";
+    });
+    html += "</tbody></table>";
+  } else {
+    html += '<p class="note">还没有任何兑换尝试。</p>';
+  }
+  $("probe").innerHTML = html;
+}
+
+// ── 申请名额(2026-09-17)──────────────────────────────────────────────
+// 数据走 GET /admin/access-requests(和 /admin/stats 同一道管理员门)。
+// ⛔ 那条路由不回 ip_hash / ua_short —— 它们存在只为限频,这一页不该多摆一份指纹。
+
+function loadAccess() {
+  apiFetch(API + "/admin/access-requests")
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok) {
+        // 401 交给 /admin/stats 那条路统一处理(清会话 → 回登录页)。
+        // 两处都清的话,人会被踢回登录页两次,第二次还会把刚填的码冲掉。
+        if (res.status === 401) return;
+        var msg = (res.j && res.j.error && res.j.error.message) || ("HTTP " + res.status);
+        $("accessTable").innerHTML =
+          '<tbody><tr><td class="err">申请列表没读出来:' + esc(msg) + "</td></tr></tbody>";
+        return;
+      }
+      ACCESS = res.j;
+      renderAccess();
+    })
+    .catch(function (e) {
+      $("accessTable").innerHTML =
+        '<tbody><tr><td class="err">申请列表没读出来:' + esc(e.message) + "</td></tr></tbody>";
+    });
+}
+
+function accessRowById(id) {
+  var rows = (ACCESS && ACCESS.requests) || [];
+  for (var i = 0; i < rows.length; i++) { if (rows[i].id === id) return rows[i]; }
+  return null;
+}
+
+function renderAccess() {
+  var rows = (ACCESS && ACCESS.requests) || [];
+  var c = (ACCESS && ACCESS.counts) || {};
+  var pending = Number(c["new"] || 0);
+
+  // 顶栏角标:没有待处理的就整个藏起来 —— 一个常年挂着「0」的红点,
+  // 看几天之后就不再被看见了,那时它真的变红也没人注意。
+  if (pending > 0) {
+    $("accessNavNum").innerHTML = esc(pending);
+    $("accessNav").classList.remove("hidden");
+  } else {
+    $("accessNav").classList.add("hidden");
+  }
+  $("accessCount").innerHTML = ACCESS
+    ? "待处理 " + esc(pending) + " · 开了 " + esc(Number(c.approved || 0)) +
+      " · 没开 " + esc(Number(c.declined || 0)) + " · 共 " + esc(Number(c.total || 0)) + " 条"
+    : "";
+
+  if (!rows.length) {
+    $("accessTable").innerHTML =
+      '<tbody><tr><td class="muted">还没有人从官网申请过名额。' +
+      '(表单在 murmur 官网「申请名额」那一栏,匿名就能填。)</td></tr></tbody>';
+    return;
+  }
+
+  // mob-hide:手机上只留「时间 / 邮箱 / 状态 / 按钮」—— 这一栏在手机上要回答的
+  // 是「有没有人在等、按不按」,备注和语言留给大屏。
+  var head = "<thead><tr><th>时间</th><th>邮箱</th><th class=\"mob-hide\">他说了什么</th>" +
+             "<th class=\"mob-hide\">语言</th>" +
+             "<th class=\"mob-hide\">已有名额?</th><th>状态</th><th></th></tr></thead>";
+  var body = rows.map(function (r) {
+    var isNew = r.status === "new";
+
+    // 已有名额:这一列是为了不让人对着一个早就开过座的邮箱再按一次
+    var seat = r.has_seat
+      ? '<span class="chip">有名额</span>'
+      : (r.has_user ? '<span class="muted">没有 · 但已有账号</span>' : '<span class="muted">没有</span>');
+
+    var state;
+    if (isNew) {
+      state = "<b>新</b>";
+    } else {
+      state = (r.status === "approved" ? "开了名额" : "没开") +
+        '<div class="muted" data-style="font-size:11.5px">' +
+        esc(r.handled_by || "—") + " · " + esc(when(r.handled_at)) +
+        (r.handled_reason ? "<br>" + esc(r.handled_reason) : "") + "</div>";
+    }
+
+    // ⚠️ 只传 id(uuid),不把邮箱塞进 onclick 属性里:邮箱是陌生人自己敲的,
+    //    一个带引号的地址就能把这段 HTML 撕开。要用的时候按 id 回表里取。
+    var act = isNew
+      ? '<button class="btn"' + actAttr("click", "accessAct", [argStr(r.id), 1]) + '>开名额</button> ' +
+        '<button class="btn quiet"' + actAttr("click", "accessAct", [argStr(r.id), 0]) + '>不开</button>'
+      : "";
+
+    return '<tr class="accrow' + (isNew ? " new" : "") + '">' +
+      "<td>" + esc(when(r.created_at)) + "</td>" +
+      '<td class="mono">' + esc(r.email) + "</td>" +
+      '<td class="access-note mob-hide">' + esc(r.note || "—") + "</td>" +
+      '<td class="mob-hide">' + esc(r.lang || "—") + "</td>" +
+      '<td class="acc-seat mob-hide">' + seat + "</td>" +
+      "<td>" + state + "</td>" +
+      '<td class="acc-act">' + act + "</td></tr>";
+  }).join("");
+
+  $("accessTable").innerHTML = head + "<tbody>" + body + "</tbody>";
+}
+
+/// 开名额 / 不开。理由用 prompt(和作废邀请码同一个形态,别新发明一种)。
+function accessAct(id, grant) {
+  var r = accessRowById(id);
+  if (!r) { alert("这条申请刚才不见了 —— 刷新一下"); return; }
+  var reason;
+  if (grant) {
+    reason = prompt("给 " + r.email + " 开名额。\n\n备注(可留空):谁介绍的 / 为什么给。");
+    if (reason === null) return;                    // 取消 = 什么都没发生
+    if (r.has_seat && !confirm(r.email + " 已经有名额了。还要再开一次吗?\n\n" +
+        "(不会重复给什么,只会把封禁/暂停解回 active,并且把这条申请标成处理过。)")) return;
+  } else {
+    reason = prompt("不给 " + r.email + " 开。\n\n为什么?(必填 —— 过几个月再翻这条,只剩它说得清)");
+    if (reason === null) return;
+    if (!reason.trim()) { alert("「不开」要写理由。"); return; }
+  }
+  reason = (reason || "").trim();
+
+  $("accessMsg").innerHTML = '<p class="note">' + (grant ? "开着…" : "标着…") + "</p>";
+  apiFetch(API + "/admin/action", {
+    method: "POST",
+    body: JSON.stringify({ action: grant ? "access_grant" : "access_dismiss",
+                           id: id, reason: reason })
+  }).then(function (rr) { return rr.json().then(function (j) { return { ok: rr.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok || res.j.ok === false) {
+        var m = (res.j && (res.j.error && res.j.error.message || res.j.error)) || "没成功";
+        $("accessMsg").innerHTML = '<p class="err">' + esc(m) + "</p>";
+        load();                                     // 多半是被另一处处理掉了 —— 拉最新的
+        return;
+      }
+      var who2 = esc(res.j.email);
+      var msg;
+      if (!grant) {
+        msg = '<p class="okmsg">' + who2 + ' 这条标成「没开」了。他不会收到任何通知 ——' +
+              '要不要回他一句,由你决定。</p>';
+      } else if (res.j.existed) {
+        // 和上面「给一个人开名额」同一个口径,一个字都不多承诺
+        msg = '<p class="okmsg">' + who2 + ' 本来就有名额,已确保是 active,这条申请标成处理过了。</p>';
+      } else if (res.j.mailed === false) {
+        msg = '<p class="okmsg">' + who2 + ' 的名额开好了。</p>' +
+              '<p class="err">但通知信<b>没发出去</b> —— 他不会知道,你得自己告诉他。</p>';
+      } else {
+        msg = '<p class="okmsg">' + who2 + ' 的名额开好了,通知信已提交给邮件服务。</p>' +
+              '<p class="note">⚠️ 提交成功不等于送达(这条路目前投递不稳)。' +
+              '稳妥起见自己也说一声:让他打开 Murmur → 登录 → 填这个邮箱,验证码那封信是可靠的。</p>';
+      }
+      // 服务端如实回这两面旗,页面就得如实转述 —— 别替它打包票
+      if (res.j.marked === false) {
+        msg += '<p class="note">⚠️ 这条申请刚才已经被别处标掉了' +
+               (grant ? ",名额仍然是开好的。" : "。") + "</p>";
+      }
+      if (res.j.audited === false) {
+        msg += '<p class="err">⚠️ 这一步<b>没记进操作留痕</b> —— 下面那张审计表里不会有它。</p>';
+      }
+      $("accessMsg").innerHTML = msg;
+      load();
+    })
+    .catch(function (e) { $("accessMsg").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; });
+}
+
+// ── 配置:模型与供应商 / 密钥 / 单价 / 回退(2026-09-29)─────────────────────
+// 路由(全部管理员门、全部记审计,action 前缀 config.):
+//   GET  /admin/config                         → {providers[], models{fast,smart}, pricing, keys[], versions}
+//   POST /admin/config/probe    {kind, provider_id?, key_name?, model_id?, …候选}  → {ok, latency_ms, error?}
+//   POST /admin/config/model    {tier, provider_id, model_id}
+//   POST /admin/config/provider {一整行}
+//   POST /admin/config/key      {name, value}     回包只有 last4 / 长度 / sha8
+//   POST /admin/config/pricing  {key, value}
+//   POST /admin/config/rollback {audit_id}        密钥行没有这个按钮
+//
+// 三条规矩写在代码里,不写在人的记性里(哨兵:tools/session-harness.mjs g–l):
+//   ① 「生效」只在**这一份表单内容**试打回 OK 之后才亮;表单一动就重新变灰,
+//      生效函数自己再核一次(按钮灰不灰只是给人看的)。
+//   ② 新 key 只待在那个密码框里:不进全局变量、不进 localStorage / URL / console,
+//      「生效」一按先把框清空再发。签名里只有「第几次改动」,没有值。
+//   ③ 回包里只要出现一段 ≥32 位的连续字母数字(真 key 的形状),整块不画、只报警 ——
+//      契约说服务端永远不回值,它真回了就是服务端出事了,页面不该替它把值摆出来。
+var CONFIG = null;
+var KEYLIKE = /[A-Za-z0-9]{32,}/;
+var cfgProbeOk = {};      // 表单名 → 试打通过时那一份表单的签名
+var cfgKeyGen = 0;        // 密钥框每改一次 +1(签名只用它,不用值)
+var cfgTierCur = "";      // 正在改哪一档
+var cfgProvCur = null;    // 正在改哪一家(null = 没开表单;"" = 新增)
+
+function cfgClean(obj) {
+  var s;
+  try { s = JSON.stringify(obj == null ? null : obj); } catch (e) { return false; }
+  return !KEYLIKE.test(String(s));
+}
+
+function cfgRaiseAlarm(where) {
+  // ⛔ 不打印命中的那一段 —— 报警本身不能变成泄漏的第二条路
+  $("cfgAlarmBody").innerHTML =
+    '<div class="alarm-row"><span class="sig">配置回包里疑似混进了密钥</span>' +
+    '<span class="det">' + esc(where) + ' 里有一段 ≥32 位的连续字母数字。按契约服务端永远不回 key 值,' +
+    '所以这一块已拒绝显示。先别在这台机器上截图 / 转发这一页,去查服务端 /admin/config 的脱敏。</span></div>';
+  $("cfgAlarm").classList.remove("hidden");
+  $("cfgSec").classList.remove("hidden");
+}
+
+function cfgErrText(j, status) {
+  var m = j && (j.error && (j.error.message || j.error) || j.detail || j.message);
+  if (m && typeof m !== "string") { try { m = JSON.stringify(m); } catch (e) { m = ""; } }
+  if (m && j && j.error && typeof j.error === "object" && j.error.code) m += "(" + j.error.code + ")";
+  m = m || ("HTTP " + status);
+  return KEYLIKE.test(m) ? "(错误原文里疑似含密钥,已隐藏;HTTP " + status + ")" : m;
+}
+
+function cfgJson(r) {
+  return r.json().then(function (j) { return { ok: r.ok, status: r.status, j: j }; },
+                       function () { return { ok: false, status: r.status, j: null }; });
+}
+
+function loadConfig() {
+  return apiFetch(API + "/admin/config")
+    .then(cfgJson)
+    .then(function (res) {
+      if (res.status === 401) return;                  // 交给 /admin/stats 那条路统一回登录页
+      if (res.status === 403) {                        // 不是管理员:整块不出现
+        CONFIG = null;
+        $("cfgSec").classList.add("hidden");
+        return;
+      }
+      if (!res.ok) {
+        CONFIG = null;
+        $("cfgSec").classList.remove("hidden");
+        $("cfgBody").classList.add("hidden");
+        $("cfgErr").textContent = "配置没读出来:" + cfgErrText(res.j, res.status);
+        $("cfgErrSec").classList.remove("hidden");
+        return;
+      }
+      if (!cfgClean(res.j)) {
+        CONFIG = null;
+        $("cfgBody").classList.add("hidden");
+        cfgRaiseAlarm("GET /admin/config 回包");
+        return;
+      }
+      CONFIG = res.j || {};
+      $("cfgErrSec").classList.add("hidden");
+      $("cfgAlarm").classList.add("hidden");
+      $("cfgSec").classList.remove("hidden");
+      $("cfgBody").classList.remove("hidden");
+      renderConfig();
+    })
+    .catch(function (e) {
+      $("cfgSec").classList.remove("hidden");
+      $("cfgBody").classList.add("hidden");
+      $("cfgErr").textContent = "配置没读出来:" + e.message;
+      $("cfgErrSec").classList.remove("hidden");
+    });
+}
+
+function cfgProviders(kind) {
+  return ((CONFIG && CONFIG.providers) || []).filter(function (p) { return !kind || p.kind === kind; });
+}
+function cfgProvider(id) {
+  var ps = cfgProviders();
+  for (var i = 0; i < ps.length; i++) if (ps[i].id === id) return ps[i];
+  return null;
+}
+function cfgWhen(iso) { return iso ? '<span class="cfg-when">' + esc(when(iso)) + "</span>" : '<span class="cfg-when">—</span>'; }
+
+// 配置改动的留痕:优先用 /admin/config 自带的 audit(带 id 才能回退);没有就从 /admin/stats 的里筛 config.*
+function cfgAuditRows() {
+  var rows = (CONFIG && Array.isArray(CONFIG.audit)) ? CONFIG.audit : ((DATA && DATA.audit) || []);
+  return rows.filter(function (r) { return String(r.action || "").indexOf("config.") === 0; });
+}
+// 服务端的配置审计行没有 target 列:对象从快照里认({kind:"model",tier} / {kind:"pricing",key} / {kind:"provider",id} / {kind:"key",name})
+function cfgTarget(r) {
+  if (r.target) return String(r.target);
+  var o = r.after || r.before || {};
+  return String(o.tier || o.key || o.name || o.provider_id || o.id || "");
+}
+function cfgActor(r) { return r.actor || r.actor_email || "—"; }
+function cfgLastAudit(target) {
+  var rows = cfgAuditRows();
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i].action !== "config.probe" && cfgTarget(rows[i]) === String(target)) {
+      return '<span class="cfg-when">' + esc(rows[i].action) + " · " + esc(cfgActor(rows[i])) + " · " + esc(when(rows[i].at || rows[i].created_at)) + "</span>";
+    }
+  }
+  return '<span class="cfg-when">—</span>';
+}
+
+function renderConfig() {
+  var c = CONFIG || {};
+  $("cfgVer").textContent = (c.versions && c.versions.config_version != null) ? "配置版本 " + c.versions.config_version : "";
+  renderCfgTiers();
+  renderCfgProviders();
+  renderCfgKeys();
+  renderCfgPricing();
+  renderCfgAudit();
+  renderRemote();
+  // 每次重画都从「没试打」开始:版本变了,旧的 OK 不算数
+  cfgProbeOk = {};
+  ["cfgTier", "cfgProv", "cfgKey"].forEach(function (f) { cfgSetApply(f, false); });
+  if (cfgTierCur) cfgTierEdit(cfgTierCur); else $("cfgTierForm").innerHTML = "";
+  if (cfgProvCur !== null) cfgProvEdit(cfgProvCur); else $("cfgProvForm").innerHTML = "";
+}
+
+function renderCfgTiers() {
+  var m = (CONFIG && CONFIG.models) || {};
+  var rows = ["fast", "smart"].map(function (t) {
+    var r = m[t] || {};
+    var p = cfgProvider(r.provider_id);
+    return "<tr><td><b>" + (t === "fast" ? "快速" : "高级") + '</b> <span class="muted mono">' + t + "</span></td>" +
+      "<td>" + esc(p ? (p.display_name || p.id) : (r.provider_id || "—")) + "</td>" +
+      '<td class="mono">' + esc(r.model_id || "—") + "</td>" +
+      '<td class="mob-hide">' + cfgWhen(r.updated_at) + "</td>" +
+      '<td class="mob-hide">' + cfgLastAudit(t) + "</td>" +
+      '<td><button class="btn quiet"' + actAttr("click", "cfgTierEdit", [argStr(t)]) + '>换</button></td></tr>';
+  }).join("");
+  $("cfgTiers").innerHTML = "<thead><tr><th>整理档</th><th>供应商</th><th>模型</th><th class=\"mob-hide\">更新</th><th class=\"mob-hide\">最后一条改动</th><th></th></tr></thead><tbody>" + rows + "</tbody>";
+}
+
+function renderCfgProviders() {
+  var ps = cfgProviders();
+  if (!ps.length) { $("cfgProviders").innerHTML = '<tbody><tr><td class="muted">还没有供应商。</td></tr></tbody>'; return; }
+  $("cfgProviders").innerHTML =
+    "<thead><tr><th>供应商</th><th>类</th><th class=\"mob-hide\">方言</th><th class=\"mob-hide\">端点</th><th>key 名</th><th>启用</th><th class=\"mob-hide\">更新</th><th></th></tr></thead><tbody>" +
+    ps.map(function (p) {
+      return "<tr><td>" + esc(p.display_name || p.id) + ' <span class="muted mono">' + esc(p.id) + "</span></td>" +
+        "<td>" + esc(p.kind) + '</td><td class="mob-hide">' + esc(p.dialect || "—") + "</td>" +
+        '<td class="mono mob-hide cfg-diff">' + esc(p.endpoint || "—") + "</td>" +
+        '<td class="mono">' + esc(p.key_name || "—") + "</td>" +
+        "<td>" + (p.enabled ? '<span class="chip ok">启用</span>' : '<span class="chip">停用</span>') + "</td>" +
+        '<td class="mob-hide">' + cfgWhen(p.updated_at) + "</td>" +
+        // 识别底座(asr 行)服务端锁着(400 asr_locked):模型与协议在客户端,换它要发版
+        (p.kind === "asr" ? '<td><span class="cfg-when" title="识别底座的模型与协议在客户端,换它要发版">发版才能改</span></td></tr>'
+                          : '<td><button class="btn quiet"' + actAttr("click", "cfgProvEdit", [argStr(p.id)]) + '>编辑</button></td></tr>');
+    }).join("") + "</tbody>";
+}
+
+// 本期不可改的两把(领导者 2026-09-29 裁决):murmur-stripe 只读 Edge secret,
+// 后台换进 Vault 再去上游吊销旧的,发信 / Stripe 验签会断 —— 显示,但不给换。
+var CFG_KEY_LOCKED = { RESEND_API_KEY: 1, STRIPE_WEBHOOK_SECRET: 1 };
+var CFG_KEY_LOCKED_NOTE = "这两把暂时只能在控制台改";
+function cfgKeyLocked(name) {
+  if (CFG_KEY_LOCKED[name]) return true;
+  var ks = (CONFIG && CONFIG.keys) || [];
+  for (var i = 0; i < ks.length; i++) if (ks[i].name === name && ks[i].writable === false) return true;   // 服务端说不可写
+  return false;
+}
+
+function renderCfgKeys() {
+  var ks = (CONFIG && CONFIG.keys) || [];
+  $("cfgKeys").innerHTML = !ks.length ? '<tbody><tr><td class="muted">没有密钥记录。</td></tr></tbody>' :
+    "<thead><tr><th>名字</th><th>末四位</th><th class='num mob-hide'>长度</th><th>指纹</th><th class='mob-hide'>更新</th></tr></thead><tbody>" +
+    ks.map(function (k) {
+      // 没配 = 「未配置」,不是错误(例:OpenRouter 还没填 key)
+      return '<tr><td class="mono">' + esc(k.name) +
+        (cfgKeyLocked(k.name) ? '<div class="cfg-when">' + CFG_KEY_LOCKED_NOTE + "</div>" : "") + "</td>" +
+        '<td class="mono">' + (k.last4 ? "…" + esc(k.last4) : '<span class="muted">未配置</span>') + "</td>" +
+        '<td class="num mob-hide">' + esc(k.len == null ? "—" : k.len) + "</td>" +
+        '<td class="mono">' + esc(k.sha8 || "—") + (k.source ? ' <span class="cfg-when">' + esc(k.source) + "</span>" : "") + "</td>" +
+        '<td class="mob-hide">' + cfgWhen(k.updated_at) + "</td></tr>";
+    }).join("") + "</tbody>";
+  var vf = CONFIG && CONFIG.versions && CONFIG.versions.vault_fallback_until;
+  if (vf) $("cfgKeys").innerHTML += '<tbody><tr><td colspan="5" class="cfg-when">来源是 env 的 key 只回落到 ' +
+    esc(String(vf).slice(0, 10)) + " 为止 —— 之后取不到 Vault 就直接报错,请在那之前在这里换一次(换进 Vault)。</td></tr></tbody>";
+  var sel = $("cfgKeyName"), keep = sel.value;
+  sel.innerHTML = ks.map(function (k) {
+    return '<option value="' + esc(k.name) + '"' + (cfgKeyLocked(k.name) ? " disabled" : "") + ">" + esc(k.name) +
+           (cfgKeyLocked(k.name) ? "(" + CFG_KEY_LOCKED_NOTE + ")" : "") + "</option>";
+  }).join("");
+  var firstOpen = ks.filter(function (k) { return !cfgKeyLocked(k.name); })[0];
+  sel.value = (keep && !cfgKeyLocked(keep)) ? keep : (firstOpen ? firstOpen.name : "");
+  cfgKeyModelShow();
+}
+
+// pricing 回包形状两种都认:{key: 数} / {key: {micros_per_unit|value, note, updated_at}} / [{key, micros_per_unit, …}]
+function cfgPricingItems() {
+  var p = (CONFIG && CONFIG.pricing) || {};
+  var list = Array.isArray(p) ? p : Object.keys(p).map(function (k) {
+    var v = p[k];
+    return (v && typeof v === "object") ? Object.assign({ key: k }, v) : { key: k, value: v };
+  });
+  return list.map(function (x) {
+    return { key: x.key, value: x.micros_per_unit != null ? x.micros_per_unit : x.value, note: x.note, updated_at: x.updated_at };
+  }).sort(function (a, b) { return String(a.key).localeCompare(String(b.key)); });
+}
+
+function renderCfgPricing() {
+  var items = cfgPricingItems();
+  if (!items.length) { $("cfgPricing").innerHTML = '<tbody><tr><td class="muted">没有单价记录。</td></tr></tbody>'; return; }
+  $("cfgPricing").innerHTML =
+    "<thead><tr><th>项</th><th class='num'>当前</th><th>新值</th><th class='mob-hide'>更新</th><th></th></tr></thead><tbody>" +
+    items.map(function (x, i) {
+      return '<tr><td class="mono">' + esc(x.key) + (x.note ? '<div class="cfg-when">' + esc(x.note) + "</div>" : "") + "</td>" +
+        '<td class="num">' + esc(x.value == null ? "—" : x.value) + "</td>" +
+        '<td><input id="cfgPrice_' + i + '" type="number" min="0" step="1" value="' + esc(x.value == null ? "" : x.value) + '" data-style="margin:0;width:110px"></td>' +
+        '<td class="mob-hide">' + cfgWhen(x.updated_at) + "</td>" +
+        '<td><button class="btn quiet"' + actAttr("click", "cfgPriceApply", [i]) + '>生效</button></td></tr>';
+    }).join("") + "</tbody>";
+}
+
+function cfgBrief(o) {
+  if (o == null) return "—";
+  var s; try { s = typeof o === "string" ? o : JSON.stringify(o); } catch (e) { s = String(o); }
+  return s.length > 220 ? s.slice(0, 220) + "…" : s;
+}
+
+function renderCfgAudit() {
+  var rows = cfgAuditRows();
+  if (!cfgClean(rows)) {
+    $("cfgAudit").innerHTML = '<tbody><tr><td class="err">配置留痕里疑似混进了密钥,已拒绝显示。</td></tr></tbody>';
+    cfgRaiseAlarm("配置留痕");
+    return;
+  }
+  if (!rows.length) { $("cfgAudit").innerHTML = '<tbody><tr><td class="muted">还没有配置改动。</td></tr></tbody>'; return; }
+  $("cfgAudit").innerHTML =
+    "<thead><tr><th>时间</th><th class=\"mob-hide\">操作人</th><th>动作</th><th>对象</th><th>之前</th><th>之后</th><th></th></tr></thead><tbody>" +
+    rows.map(function (r) {
+      var id = r.id != null ? r.id : r.audit_id;
+      var isKey = /key|secret/i.test(String(r.action || ""));
+      var isRemote = /^config\.remote/.test(String(r.action || ""));   // 远程配置有自己的回退(按 revision),不走 /admin/config/rollback
+      var isRollbackable = !isKey && !isRemote && id != null && r.before != null;
+      // 服务端只许回退「最近一次改动」(审计行的 config_version = 当前版本,否则 409 stale);行上没带版本就不预判
+      var curVer = CONFIG && CONFIG.versions && CONFIG.versions.config_version;
+      var isLatest = r.config_version == null || curVer == null || Number(r.config_version) === Number(curVer);
+      var act = isKey ? '<span class="cfg-when">密钥不回退</span>'
+        : isRemote ? '<span class="cfg-when">在「远程配置」里回退</span>'
+        : (isRollbackable && isLatest) ? '<button class="btn quiet"' + actAttr("click", "cfgRollback", [argStr(id)]) + '>回退到这一版</button>'
+        : isRollbackable ? '<span class="cfg-when" title="之后配置又改过;只有最近一次改动能回退">之后又改过</span>'
+        : '<span class="cfg-when">—</span>';
+      return "<tr><td>" + esc(when(r.at || r.created_at)) + '</td><td class="mob-hide">' + esc(cfgActor(r)) + "</td>" +
+        '<td class="mono">' + esc(r.action) + "</td><td>" + esc(cfgTarget(r) || "—") + "</td>" +
+        '<td class="mono cfg-diff">' + esc(cfgBrief(r.before)) + "</td>" +
+        '<td class="mono cfg-diff">' + esc(cfgBrief(r.after)) + "</td><td>" + act + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+// ── 试打 → 生效 的门 ──────────────────────────────
+function cfgSetApply(form, on) { var b = $(form + "Apply"); if (b) b.disabled = !on; }
+function cfgMsg(form, cls, html) { var el = $(form + "Msg"); if (el) el.innerHTML = '<p class="' + cls + '">' + html + "</p>"; }
+
+// 表单签名:试打时记下,生效时再算一遍,对不上就不许生效。⛔ 密钥表单的签名里没有值。
+function cfgSig(form) {
+  if (form === "cfgTier") return JSON.stringify([cfgTierCur, $("cfgTierProv").value, ($("cfgTierModel").value || "").trim(),
+                                                 $("cfgTierIn").value || "", $("cfgTierOut").value || ""]);
+  if (form === "cfgProv") return JSON.stringify(cfgProvCandidate());
+  if (form === "cfgKey") return JSON.stringify([$("cfgKeyName").value, cfgKeyGen, ($("cfgKeyModel").value || "").trim()]);   // 模型不是秘密,可以进签名
+  return "";
+}
+function cfgDirty(form) { delete cfgProbeOk[form]; cfgSetApply(form, false); }
+function cfgIsOk(form) { return cfgProbeOk[form] != null && cfgProbeOk[form] === cfgSig(form); }
+
+function cfgRunProbe(form, body) {
+  var sig = cfgSig(form);
+  cfgDirty(form);
+  cfgMsg(form, "note", "试打中…(真打一次最小请求)");
+  return apiFetch(API + "/admin/config/probe", { method: "POST", body: JSON.stringify(body) })
+    .then(cfgJson)
+    .then(function (res) {
+      if (!cfgClean(res.j)) { cfgMsg(form, "err", "试打回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("试打回包"); return; }
+      if (cfgSig(form) !== sig) { cfgMsg(form, "note", "试打回来时表单已经改过了 —— 再试打一次。"); return; }
+      if (res.ok && res.j && res.j.ok === true) {
+        cfgProbeOk[form] = sig;
+        cfgSetApply(form, true);
+        cfgMsg(form, "okmsg", "试打 OK" + (res.j.latency_ms != null ? " · " + esc(res.j.latency_ms) + " ms" : "") + " —— 现在可以点「生效」。");
+      } else {
+        cfgMsg(form, "err", "试打没过:" + esc(cfgErrText(res.j, res.status)));
+      }
+    })
+    .catch(function (e) { cfgMsg(form, "err", "试打没打出去:" + esc(e.message)); });
+}
+
+// 契约修正 1 §6:每次写之前先要一个一次性确认码(POST /admin/config/challenge,5 分钟、只能用一次),
+// 写请求带请求头 x-admin-confirm。不是独立防线,挡的是「会话被复用后的静默写」。⛔ 试打不带它(试打不写)。
+function cfgChallenge() {
+  return apiFetch(API + "/admin/config/challenge", { method: "POST", body: "{}" }).then(cfgJson).then(function (res) {
+    var n = res.ok && res.j && res.j.nonce;
+    if (!n) throw new Error("没拿到确认码:" + cfgErrText(res.j, res.status));
+    return String(n);
+  });
+}
+function cfgPost(path, bodyText) {
+  return cfgChallenge().then(function (nonce) {
+    return apiFetch(API + "/admin/config/" + path,
+                    { method: "POST", body: typeof bodyText === "string" ? bodyText : JSON.stringify(bodyText),
+                      headers: { "x-admin-confirm": nonce } }).then(cfgJson);
+  });
+}
+// 写失败的三种说法:服务端「先试后写」没过(probe_failed)/ 配置已被后来的改动更新(409 stale)/ 其它
+function cfgWriteErr(res) {
+  var j = res.j || {}, code = j.error && typeof j.error === "object" ? j.error.code : "";
+  if (res.status === 409 || code === "stale") return "配置已被后来的改动更新,刷新后再试。";
+  if (code === "probe_failed") {
+    var ps = [].concat(j.probe ? [j.probe] : [], j.probes || []).filter(function (x) { return x && x.ok === false; }).map(function (x) {
+      return (x.provider_id ? x.provider_id + " " : "") + (x.model_id ? x.model_id + " " : "") + (x.error || "失败") +
+             (x.latency_ms != null ? " · " + x.latency_ms + " ms" : "");
+    });
+    if (j.dry_run && j.dry_run.sample_label) ps.push(j.dry_run.sample_label + " ≈ " + usd(j.dry_run.sample_micro_usd));
+    return "生效前服务端用这份新配置试打没过,什么都没改:" + cfgErrText(j, res.status) + (ps.length ? "(" + ps.join(";") + ")" : "");
+  }
+  return "没生效:" + cfgErrText(j, res.status);
+}
+// 写成功后:表单收起(整块会按新版本重画,表单里的消息会被冲掉),结果写进卡片上常驻的那一格
+function cfgAfterWrite(form, res, okText, doneForm) {
+  if (!cfgClean(res.j)) { cfgMsg(form, "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("写入回包"); return false; }
+  if (!res.ok || (res.j && res.j.ok === false)) { cfgMsg(form, "err", esc(cfgWriteErr(res))); return false; }
+  if (form === "cfgTier") cfgTierCur = "";
+  if (form === "cfgProv") cfgProvCur = null;
+  cfgMsg(doneForm || form, "okmsg", okText);
+  load();                                  // 连带重拉 /admin/config(load 里并行拉)和留痕
+  return true;
+}
+
+// ── 整理档换模型 ──
+function cfgTierEdit(t) {
+  cfgTierCur = t;
+  var cur = ((CONFIG && CONFIG.models) || {})[t] || {};
+  var ps = cfgProviders("llm");
+  $("cfgTierForm").innerHTML =
+    '<div class="cfg-form"><div class="two"><div><label>「' + (t === "fast" ? "快速" : "高级") + '」档用哪家</label>' +
+    '<select id="cfgTierProv" data-change="cfgDirty" data-args=\'["cfgTier"]\'>' +
+    ps.map(function (p) {
+      return '<option value="' + esc(p.id) + '"' + (p.id === cur.provider_id ? " selected" : "") + (p.enabled ? "" : " disabled") + ">" +
+             esc((p.display_name || p.id) + (p.enabled ? "" : "(停用)")) + "</option>";
+    }).join("") + "</select></div>" +
+    '<div><label>模型 id(照这家的写法)</label><input id="cfgTierModel" type="text" spellcheck="false" value="' + esc(cur.model_id || "") +
+    '" data-input="cfgDirty" data-args=\'["cfgTier"]\'></div></div>' +
+    // 价键可选:不选 = 沿用当前那一对(换了家但价键还是旧家的,要自己留意)
+    '<div class="two">' + cfgPriceKeySelect("cfgTierIn", "输入价键", cur.in_price_key) + cfgPriceKeySelect("cfgTierOut", "输出价键", cur.out_price_key) + "</div>" +
+    '<div class="row"><button class="btn quiet" data-click="cfgTierProbe">试打</button>' +
+    '<button class="btn" id="cfgTierApply" disabled data-click="cfgTierApply">生效</button>' +
+    '<button class="linkbtn" data-click="cfgTierClose">收起</button></div>' +
+    '<div id="cfgTierMsg"></div></div>';
+  cfgDirty("cfgTier");
+}
+function cfgPriceKeySelect(id, label, curKey) {
+  return '<div><label>' + label + '</label><select id="' + id + '" data-change="cfgDirty" data-args=\'["cfgTier"]\'>' +
+    '<option value="">沿用当前价键' + (curKey ? "(" + esc(curKey) + ")" : "") + "</option>" +
+    cfgPricingItems().filter(function (x) { return /^llm_/.test(x.key); }).map(function (x) {
+      return '<option value="' + esc(x.key) + '">' + esc(x.key) + "(" + esc(x.value) + ")</option>";
+    }).join("") + "</select></div>";
+}
+function cfgTierProbe() {
+  var model = ($("cfgTierModel").value || "").trim();
+  if (!model) { cfgMsg("cfgTier", "err", "模型 id 没填。"); return; }
+  return cfgRunProbe("cfgTier", { kind: "llm", provider_id: $("cfgTierProv").value, model_id: model });
+}
+function cfgTierApply() {
+  if (!cfgIsOk("cfgTier")) { cfgDirty("cfgTier"); cfgMsg("cfgTier", "err", "先试打,回 OK 才能生效。"); return; }
+  var body = { tier: cfgTierCur, provider_id: $("cfgTierProv").value, model_id: ($("cfgTierModel").value || "").trim() };
+  if ($("cfgTierIn").value) body.in_price_key = $("cfgTierIn").value;       // 不选就不带 = 服务端沿用当前价键
+  if ($("cfgTierOut").value) body.out_price_key = $("cfgTierOut").value;
+  var cur = ((CONFIG && CONFIG.models) || {})[cfgTierCur] || {};
+  cfgDirty("cfgTier");
+  return cfgPost("model", body).then(function (res) {
+    var keep = (!body.in_price_key || !body.out_price_key)
+      ? " 价键:" + esc((res.j && res.j.notice) || ("沿用当前价键 " + (body.in_price_key || cur.in_price_key || "—") + " / " + (body.out_price_key || cur.out_price_key || "—"))) + "。"
+      : "";
+    cfgAfterWrite("cfgTier", res, "生效了:「" + esc(body.tier) + "」档 → " + esc(body.provider_id) + " / " + esc(body.model_id) + "。客户端下一次请求就走它。" + keep, "cfgModels");
+  }).catch(function (e) { cfgMsg("cfgTier", "err", esc(e.message)); });
+}
+
+// ── 供应商 ──
+var CFG_DIALECTS = ["openai_compatible"];   // 契约修正 1 §5:本期只认有适配器的这一种
+function cfgProvEdit(id) {
+  cfgProvCur = id;
+  var p = (id && cfgProvider(id)) || { id: "", kind: "llm", display_name: "", endpoint: "", dialect: "openai_compatible", key_name: "",
+                                        default_params: {}, strip_params: [], enabled: true };
+  var keyNames = ((CONFIG && CONFIG.keys) || []).map(function (k) { return k.name; });
+  function inp(fid, label, val, extra) {
+    return '<div><label>' + label + '</label><input id="' + fid + '" type="text" spellcheck="false" value="' + esc(val) +
+           '" data-input="cfgDirty" data-args=\'["cfgProv"]\'' + (extra || "") + "></div>";
+  }
+  var dp = ""; try { dp = JSON.stringify(p.default_params || {}); } catch (e) { dp = "{}"; }
+  $("cfgProvForm").innerHTML =
+    '<div class="cfg-form"><div class="two">' +
+    inp("cfgProvId", "id(只能迁移改)", p.id, " readonly") +
+    inp("cfgProvName", "显示名", p.display_name || "") +
+    '<div><label>类(只能迁移改)</label><select id="cfgProvKind" disabled>' +
+      ["llm", "asr"].map(function (k) { return '<option value="' + k + '"' + (p.kind === k ? " selected" : "") + ">" + k + "</option>"; }).join("") + "</select></div>" +
+    '<div><label>参数方言(只能迁移改)</label><select id="cfgProvDialect" disabled>' +
+      CFG_DIALECTS.map(function (k) { return '<option value="' + k + '"' + (p.dialect === k ? " selected" : "") + ">" + k + "</option>"; }).join("") + "</select></div>" +
+    "</div>" +
+    inp("cfgProvEndpoint", "端点(chat completions 的完整 URL;host 只能是:" + esc(cfgHostAllow(p.id).join(" / ") || "—") + ")", p.endpoint || "") +
+    '<div class="two">' +
+    inp("cfgProvKey", "key 名(一把 key 只给这一家用,只能迁移改)", p.key_name || "", " readonly") +
+    inp("cfgProvStrip", "这家不认、要剥掉的参数(逗号分隔)", (p.strip_params || []).join(", ")) +
+    "</div>" +
+    inp("cfgProvParams", "默认参数(JSON)", dp) +
+    '<div class="two">' + inp("cfgProvModel", "试打用哪个模型(不填 = 这家挂着的那一档的模型)", "") +
+    '<div><label>启用</label><select id="cfgProvEnabled" data-change="cfgDirty" data-args=\'["cfgProv"]\'><option value="1"' + (p.enabled ? " selected" : "") +
+      '>启用</option><option value="0"' + (p.enabled ? "" : " selected") + ">停用</option></select></div></div>" +
+    '<div class="row"><button class="btn quiet" data-click="cfgProvProbe">试打</button>' +
+    '<button class="btn" id="cfgProvApply" disabled data-click="cfgProvApply" title="改了端点 / 参数时 = 试打并生效(服务端先试,没过不存)">生效</button>' +
+    '<button class="linkbtn" data-click="cfgProvClose">收起</button></div>' +
+    '<div id="cfgProvMsg"></div></div>';
+  cfgDirty("cfgProv");
+}
+// 服务端 POST provider 只收这几项(id / key_name / kind / dialect / host_allowlist 只能迁移改)
+function cfgProvCandidate() {
+  var params = {};
+  try { params = JSON.parse(($("cfgProvParams").value || "").trim() || "{}"); } catch (e) { params = { __bad_json__: true }; }
+  return {
+    id: ($("cfgProvId").value || "").trim(),
+    display_name: ($("cfgProvName").value || "").trim(),
+    endpoint: ($("cfgProvEndpoint").value || "").trim(),
+    default_params: params,
+    strip_params: ($("cfgProvStrip").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean),
+    enabled: $("cfgProvEnabled").value === "1"
+  };
+}
+// 这份候选改没改「打到哪、怎么打」:端点 / 默认参数 / 剥掉的参数。
+// ⚠️ 服务端 /admin/config/probe 只打**已存的那一行**,试不到这些改动;它们由「生效」那一个请求完成 ——
+//    服务端先用候选试打,没过 400 probe_failed、什么都不存(契约修正 1 §2)。所以这时按钮叫「试打并生效」。
+function cfgProvWireChanged(c) {
+  var cur = cfgProvider(c.id) || {};
+  return (cur.endpoint || "") !== c.endpoint ||
+         JSON.stringify(cur.default_params || {}) !== JSON.stringify(c.default_params) ||
+         JSON.stringify(cur.strip_params || []) !== JSON.stringify(c.strip_params);
+}
+function cfgProvProbe() {
+  var c = cfgProvCandidate();
+  if (!cfgProvider(c.id)) { cfgMsg("cfgProv", "err", "没有这一家(新供应商只能经迁移加)。"); return; }
+  if (c.default_params && c.default_params.__bad_json__) { cfgMsg("cfgProv", "err", "默认参数不是合法 JSON。"); return; }
+  var bad = cfgHostProblem(c);
+  if (bad) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", esc(bad)); return; }
+  if (cfgProvWireChanged(c)) {
+    cfgDirty("cfgProv");
+    cfgMsg("cfgProv", "note", "改了端点 / 参数:单独的「试打」只能打已存的那一行,试不到这份改动。" +
+      "直接点「试打并生效」—— 服务端先用这份候选试打,没过就什么都不存。");
+    cfgSetApply("cfgProv", true);
+    return;
+  }
+  var model = ($("cfgProvModel").value || "").trim();
+  return cfgRunProbe("cfgProv", { kind: "llm", provider_id: c.id, model_id: model || undefined });
+}
+// 端点 host 白名单(契约修正 1 §1):清单从 GET /admin/config 读 —— 每个供应商行上的 host_allowlist
+// (只能迁移改)。前端只是先提示,真门在服务端(还要解析 IP、不跟随重定向)。
+function cfgHostAllow(id) {
+  var p = id && cfgProvider(id);
+  var list = (p && p.host_allowlist) || [];
+  return Array.isArray(list) ? list : [];
+}
+function cfgHostProblem(c) {
+  var m = /^https:\/\/([^\/:?#]+)(:\d+)?(\/|$)/i.exec(c.endpoint || "");
+  if (!m) return "端点要是 https:// 开头的完整 URL。";
+  var host = m[1].toLowerCase(), allow = cfgHostAllow(c.id).map(function (h) { return String(h).toLowerCase(); });
+  if (allow.indexOf(host) < 0) return "端点的 host「" + host + "」不在允许清单里(" + (allow.join(" / ") || "清单为空") + ")。清单只能由迁移改。";
+  return "";
+}
+function cfgProvApply() {
+  var c = cfgProvCandidate();
+  var bad = cfgHostProblem(c);
+  if (bad) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", esc(bad)); return; }
+  var wire = !c.default_params.__bad_json__ && cfgProvWireChanged(c);
+  // 没改端点 / 参数:照常要求这份表单先试打过;改了:服务端在同一个请求里先用候选试打(fail-closed)
+  if (!wire && !cfgIsOk("cfgProv")) { cfgDirty("cfgProv"); cfgMsg("cfgProv", "err", "先试打,回 OK 才能生效。"); return; }
+  if (wire && !confirm("「" + c.id + "」改了端点 / 参数。\n\n服务端会先用这份新配置真打一次,通过才保存并立刻生效;没通过什么都不改。继续?")) return;
+  var pm = ($("cfgProvModel").value || "").trim();
+  if (pm) c.probe_model_id = pm;
+  cfgDirty("cfgProv");
+  return cfgPost("provider", c).then(function (res) {
+    cfgAfterWrite("cfgProv", res, "生效了:供应商 " + esc(c.id) + " 已保存。", "cfgModels");
+  }).catch(function (e) { cfgMsg("cfgProv", "err", esc(e.message)); });
+}
+
+// ── 密钥 ──
+function cfgKeyDirty() { cfgKeyGen++; cfgDirty("cfgKey"); cfgKeyModelShow(); }
+// 这家挂在哪一档上就用那一档的模型;没挂 → null(要人在「试打模型」框里填)
+function cfgTierModelOf(pid) {
+  var m = (CONFIG && CONFIG.models) || {};
+  if (m.fast && m.fast.provider_id === pid) return m.fast.model_id;
+  if (m.smart && m.smart.provider_id === pid) return m.smart.model_id;
+  return null;
+}
+function cfgKeyNeedsModel() {
+  var p = cfgKeyTarget($("cfgKeyName").value);
+  return !!(p && p.kind === "llm" && !cfgTierModelOf(p.id));
+}
+function cfgKeyModelShow() {
+  if (cfgKeyNeedsModel()) $("cfgKeyModelBox").classList.remove("hidden");
+  else $("cfgKeyModelBox").classList.add("hidden");
+}
+function cfgKeyTarget(name) {
+  var ps = cfgProviders();
+  for (var i = 0; i < ps.length; i++) if (ps[i].key_name === name) return ps[i];
+  return null;
+}
+function cfgKeyProbe() {
+  var name = $("cfgKeyName").value;
+  if (cfgKeyLocked(name)) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", esc(name) + ":" + CFG_KEY_LOCKED_NOTE + "。"); return; }
+  var p = cfgKeyTarget(name);
+  if (!p) { cfgMsg("cfgKey", "err", "没有哪家供应商用 " + esc(name) + " —— 没法试打,也就不能在这里换。"); return; }
+  if (!$("cfgKeyVal").value) { cfgMsg("cfgKey", "err", "新 key 没填。"); return; }
+  var model = p.kind === "llm" ? (cfgTierModelOf(p.id) || ($("cfgKeyModel").value || "").trim() || undefined) : undefined;
+  if (p.kind === "llm" && !model) { cfgKeyModelShow(); cfgMsg("cfgKey", "err", "这家还没用在任何档,试打要指定一个模型 id。"); return; }
+  // value 直接从框里读进请求体,不经过任何变量
+  return cfgRunProbe("cfgKey", { kind: p.kind, provider_id: p.id, key_name: name, model_id: model, value: $("cfgKeyVal").value });
+}
+function cfgKeyApply() {
+  if (!cfgIsOk("cfgKey")) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", "先试打,回 OK 才能生效。"); return; }
+  var name = $("cfgKeyName").value;
+  if (cfgKeyLocked(name)) { cfgDirty("cfgKey"); cfgMsg("cfgKey", "err", esc(name) + ":" + CFG_KEY_LOCKED_NOTE + "。"); return; }
+  var pk = cfgKeyTarget(name);
+  var km = pk && pk.kind === "llm" && !cfgTierModelOf(pk.id) ? ($("cfgKeyModel").value || "").trim() : "";
+  var body = JSON.stringify(km ? { name: name, value: $("cfgKeyVal").value, model_id: km } : { name: name, value: $("cfgKeyVal").value });
+  $("cfgKeyVal").value = "";                  // ⛔ 先清框再发:不管成没成功,值都不再留在页面上
+  cfgKeyDirty();
+  return cfgPost("key", body).then(function (res) {
+    body = null;
+    var k = (res.j && res.j.key) || {};
+    cfgAfterWrite("cfgKey", res, "生效了:" + esc(name) + (k.last4 ? " 现在是 …" + esc(k.last4) : "") + "。<b>" +
+      esc((res.j && res.j.reminder) || "新 key 生效后请在上游吊销旧 key;在途请求可能失败一两次。") + "</b>");
+  }).catch(function (e) { body = null; cfgMsg("cfgKey", "err", esc(e.message) + "(框已清空,重新粘贴再试打)"); });
+}
+
+// ── 单价 ──
+function cfgPriceApply(i) {
+  var x = cfgPricingItems()[i];
+  if (!x) return;
+  var raw = ($("cfgPrice_" + i).value || "").trim();
+  var v = Number(raw);
+  if (raw === "" || !isFinite(v) || v < 0 || Math.floor(v) !== v) { cfgMsg("cfgPrice", "err", esc(x.key) + ":要一个 ≥0 的整数(微美元)。"); return; }
+  if (Number(x.value) === v) { cfgMsg("cfgPrice", "note", esc(x.key) + " 没变。"); return; }
+  if (!confirm("把 " + x.key + " 从 " + x.value + " 改成 " + v + "?\n\n这会影响下一把 lease 的预扣和之后的结算(已经签出去的不追溯)。")) return;
+  return cfgPost("pricing", { key: x.key, value: v }).then(function (res) {
+    var d = res.j && res.j.dry_run;
+    cfgAfterWrite("cfgPrice", res, "生效了:" + esc(x.key) + " = " + esc(v) + "。" +
+      (d && d.sample_label ? "(服务端试算:" + esc(d.sample_label) + " ≈ " + esc(usd(d.sample_micro_usd)) + ")" : ""));
+  }).catch(function (e) { cfgMsg("cfgPrice", "err", esc(e.message)); });
+}
+
+// ── 回退 ──
+function cfgRollback(id) {
+  var rows = cfgAuditRows(), r = null;
+  for (var i = 0; i < rows.length; i++) if (String(rows[i].id != null ? rows[i].id : rows[i].audit_id) === String(id)) r = rows[i];
+  if (!r) { cfgMsg("cfgAudit", "err", "这一行刚才不见了 —— 刷新一下。"); return; }
+  if (/key|secret/i.test(String(r.action || ""))) { cfgMsg("cfgAudit", "err", "密钥不回退。"); return; }
+  if (/^config\.remote/.test(String(r.action || ""))) { cfgMsg("cfgAudit", "err", "远程配置在「远程配置」那一块按 revision 回退。"); return; }
+  if (!confirm("把 " + (cfgTarget(r) || r.action) + " 回退到这一行改动之前的样子?\n\n之前:" + cfgBrief(r.before))) return;
+  return cfgPost("rollback", { audit_id: r.id != null ? r.id : r.audit_id }).then(function (res) {
+    cfgAfterWrite("cfgAudit", res, "回退了。审计里多了一行。");
+  }).catch(function (e) { cfgMsg("cfgAudit", "err", esc(e.message)); });
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 远程配置(2026-09-30,契约 docs/CONTRACT-remote-config.md v0.2)
+//   GET  /admin/config                    → 多一格 remote:{schema_version, revision, published_at, published_by, note, mail_status,
+//                                            current{flags,defaults,styles,copy,…下发外壳}, builtin{flags,defaults,styles{场景:{text,knobs}},copy}
+//                                            (builtin 里 null = 客户端内置、服务端没登记), clients, history[], limits, preview_samples}
+//                                            读挂了 → remote = {error}
+//   POST /admin/config/remote             {expect_revision, note, config}   写:先 challenge 拿 nonce,带 x-admin-confirm
+//                                            → {ok, revision, previous, warnings[{path,word}], mail} / 400 {invalid{path,rule}, error{code:"invalid_config"}}
+//   POST /admin/config/remote/preview     {styles}                          不写配置、不带 nonce(费用记 admin.probe)
+//                                            → {ok(任一条失败即 false), samples[{scene,input,ok,output|error,latency_ms}], cost_micro_usd, warnings}
+//   POST /admin/config/remote/rollback    {expect_revision, to_revision}    写:同样带 nonce;当前 revision 不对 → 409 stale
+// 四条规矩写在代码里(哨兵 tools/session-harness.mjs r–v):
+//   ① extra 违规(> 200 字 / 换行 / 控制字符 / 花括号 / 反引号)发布与预览都**不发请求**;角色词只黄色提醒、不拦。
+//   ② 发布 = 先拿一次性 nonce 再 POST;服务端 400 把原文(message / code / details)原样摆出来,不改写成人话。
+//   ③ 回退只挂在最近一次发布上;409 stale 说人话。
+//   ④ 预览结果只画进那一格 DOM:不进 localStorage、不进全局变量;标「只供人眼看,不是质量证明」。
+// ════════════════════════════════════════════════════════════════════
+var RC_FLAGS = [
+  ["scene_styling_default_on", "场景风格默认开", true],
+  ["nextword_default_on", "下一个词联想默认开", true],
+  ["ai_card_default_on", "AI 整理卡默认开", true],
+  ["kill_scene_styling", "紧急关 · 场景风格", false],
+  ["kill_ai_card", "紧急关 · AI 整理卡", false]
+];                                                    // 第三格 = 公开键(/config/public 也下发)
+var RC_DEFAULTS = [
+  ["hud_done_seconds", "整理完成后 HUD 停留(秒)", 0.8, 4.0, 0.1],
+  ["parked_ttl_seconds", "暂存保留(秒)", 10, 180, 1],
+  ["quota_warn_ratio", "额度提醒阈值(用掉的比例)", 0.5, 0.95, 0.01]
+];
+var RC_SCENES = [["email", "邮件"], ["chat", "聊天"], ["code", "代码 / 终端"], ["aiAssistant", "给 AI 下指令"],
+                 ["document", "文档 / 笔记"], ["social", "社交发帖"], ["searchField", "搜索框"], ["shortField", "单行表单框"]];
+var RC_KNOBS = [
+  ["register", "语气", [["formal", "正式"], ["neutral", "中性"], ["casual", "随意"]]],
+  ["punctuation", "标点", [["keep", "保留原样"], ["complete", "补全"], ["light", "少加"]]],
+  ["keep_technical", "术语原样", [["1", "保留"], ["0", "不强求"]]],
+  ["structure", "结构", [["prose", "段落"], ["list_ok", "可以列表"]]]
+];
+var RC_COPY = [["quota_exhausted_free", "免费额度用完"], ["quota_exhausted_pro", "Pro 额度用完"], ["update_available", "有新版本"]];
+var RC_EXTRA_MAX = 200;
+var rcPreviewSig = null;          // 预览时那一份候选 styles 的签名(只有签名,没有结果)
+
+function rcRemote() { return (CONFIG && CONFIG.remote) || null; }
+function rcLive() { var r = rcRemote(); return r && !r.error ? r : null; }
+function rcSnap() { var r = rcRemote() || {}; return r.current || r.snapshot || r.config || r; }
+function rcBuiltin() { var r = rcRemote() || {}; return r.builtin || r.defaults_builtin || {}; }
+function rcPart(o, part) { return (o && o[part] && typeof o[part] === "object") ? o[part] : {}; }
+function rcRev() { var r = rcRemote(); return r && r.revision != null ? Number(r.revision) : null; }
+function rcSceneList() {
+  var seen = {}, list = RC_SCENES.slice();
+  list.forEach(function (s) { seen[s[0]] = 1; });
+  // 服务端多给的场景(客户端新加的)也画出来,名字就用 rawValue
+  Object.keys(rcPart(rcBuiltin(), "styles")).concat(Object.keys(rcPart(rcSnap(), "styles"))).forEach(function (k) {
+    if (!seen[k] && k !== "unknown") { seen[k] = 1; list.push([k, k]); }
+  });
+  return list;
+}
+// 稳定序列化(键排序)—— 比较「改没改」用
+function rcStable(v) {
+  if (v === undefined) return "undefined";
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return "[" + v.map(rcStable).join(",") + "]";
+  return "{" + Object.keys(v).sort().map(function (k) { return JSON.stringify(k) + ":" + rcStable(v[k]); }).join(",") + "}";
+}
+function rcShow(v) {
+  if (v === undefined) return '<span class="muted">—</span>';
+  if (v === null) return '<span class="muted" title="服务端没登记这一项的内置值,以客户端为准">客户端内置</span>';
+  if (v === true) return "开";
+  if (v === false) return "关";
+  return esc(typeof v === "object" ? JSON.stringify(v) : v);
+}
+// 每条的「最后改动」:服务端给了逐键的 changed{路径: {revision, at, by}} 就用它,没给就用整份快照那一次
+function rcChanged(path) {
+  var r = rcRemote() || {}, c = r.changed && r.changed[path];
+  if (c) return '<span class="cfg-when">r' + esc(c.revision) + (c.at ? " · " + esc(when(c.at)) : "") + (c.by ? " · " + esc(c.by) : "") + "</span>";
+  var cur = rcPart(rcSnap(), path.split(".")[0])[path.split(".")[1]];
+  if (cur === undefined) return '<span class="cfg-when">—</span>';
+  return '<span class="cfg-when">r' + esc(r.revision) + (r.published_at ? " · " + esc(when(r.published_at)) : "") + "</span>";
+}
+
+function renderRemote() {
+  var r = rcRemote();
+  if (!r || r.error) {
+    $("rcBody").classList.add("hidden");
+    $("rcVer").textContent = "";
+    $("rcNone").innerHTML = !r ? '<p class="muted">服务端还没有远程配置(GET /admin/config 里没有 remote 这一格)。</p>'
+                               : '<p class="err">远程配置没读出来:' + esc(r.error) + "(模型 / 密钥 / 单价照常)</p>";
+    $("rcNone").classList.remove("hidden");
+    return;
+  }
+  $("rcNone").classList.add("hidden");
+  $("rcBody").classList.remove("hidden");
+  $("rcVer").textContent = "revision " + (r.revision == null ? "—" : r.revision) + " · schema " + (r.schema_version == null ? "—" : r.schema_version);
+  $("rcSchema").innerHTML = esc(r.clients || ("schema_version " + (r.schema_version == null ? "—" : r.schema_version) +
+    ":0.53 及以上的 Mac 客户端会吃到这份配置;更旧的版本拿不到、也不受影响;iOS 不接。")) +
+    " 生效口径:客户端下一次刷新(约 " + esc((r.refresh_s || rcSnap().refresh_s || 300) / 60) + " 分钟内)/ 下一次听写,不承诺更快。";
+  renderRcHistory();
+  renderRcFlags();
+  renderRcStyles();
+  renderRcCopy();
+  $("rcPreview").innerHTML = "";               // 版本变了,旧预览不算数
+  $("rcPreviewMsg").innerHTML = "";
+  rcPreviewSig = null;
+  $("rcPubHint").textContent = r.revision != null ? "发布后是 revision " + (Number(r.revision) + 1) : "";
+}
+
+function rcHistoryRows() {
+  var r = rcRemote() || {};
+  var h = Array.isArray(r.history) ? r.history.slice() : [];
+  if (!h.length && r.revision != null) h = [{ revision: r.revision, published_at: r.published_at, published_by: r.published_by, note: r.note }];
+  return h.sort(function (a, b) { return Number(b.revision) - Number(a.revision); });
+}
+function rcPrevRevision() {
+  var h = rcHistoryRows(), cur = rcRev();
+  for (var i = 0; i < h.length; i++) if (Number(h[i].revision) < cur) return Number(h[i].revision);
+  return cur != null && cur >= 1 ? cur - 1 : null;       // to_revision 0 = 回到「从未发布」(全内置),服务端认
+}
+function renderRcHistory() {
+  var h = rcHistoryRows(), cur = rcRev(), prev = rcPrevRevision();
+  if (!h.length) { $("rcHistory").innerHTML = '<tbody><tr><td class="muted">还没有发布过。</td></tr></tbody>'; return; }
+  $("rcHistory").innerHTML = "<thead><tr><th>revision</th><th>时间</th><th class=\"mob-hide\">操作人</th><th>说明</th><th></th></tr></thead><tbody>" +
+    h.map(function (x) {
+      // 回退只挂在最近一次(= 当前 revision)上,且要有更早的一版可回
+      var act = (Number(x.revision) === cur && prev != null)
+        ? '<button class="btn quiet" data-click="rcRollback">回退这一次(回到 r' + esc(prev) + ")</button>"
+        : '<span class="cfg-when">' + (Number(x.revision) === cur ? "没有更早的版本" : "—") + "</span>";
+      return '<tr><td class="mono">r' + esc(x.revision) + (Number(x.revision) === cur ? ' <span class="chip ok">当前</span>' : "") + "</td>" +
+        "<td>" + esc(when(x.published_at || x.created_at)) + '</td><td class="mob-hide">' + esc(x.published_by || x.actor_email || "—") + "</td>" +
+        "<td>" + esc(x.note || (x.rollback_of != null ? "回退到 r" + x.rollback_of : Number(x.revision) === 0 ? "从未发布(全用内置)" : "")) +
+        (x.mail_status === "failed" ? ' <span class="chip risk" title="改动告警信没发出去">告警信没发出</span>' : "") + "</td><td>" + act + "</td></tr>";
+    }).join("") + "</tbody>";
+}
+
+function renderRcFlags() {
+  var cur = rcSnap(), bi = rcBuiltin();
+  var cf = rcPart(cur, "flags"), bf = rcPart(bi, "flags"), cd = rcPart(cur, "defaults"), bd = rcPart(bi, "defaults");
+  var head = "<thead><tr><th>项</th><th>内置默认</th><th>当前远程</th><th>新值</th><th class=\"mob-hide\">最后改动</th></tr></thead><tbody>";
+  var rows = RC_FLAGS.map(function (f) {
+    return '<tr><td>' + esc(f[1]) + (f[2] ? ' <span class="chip pub" title="匿名 /config/public 也下发">公开</span>' : "") +
+      '<div class="cfg-when mono">flags.' + esc(f[0]) + "</div></td>" +
+      "<td>" + rcShow(bf[f[0]]) + "</td><td>" + (cf[f[0]] === undefined ? '<span class="muted">未设 = 用内置</span>' : "<b>" + rcShow(cf[f[0]]) + "</b>") + "</td>" +
+      '<td><select id="rcF_' + f[0] + '"><option value="">不设(用内置)</option><option value="1">开</option><option value="0">关</option></select></td>' +
+      '<td class="mob-hide">' + rcChanged("flags." + f[0]) + "</td></tr>";
+  }).concat(RC_DEFAULTS.map(function (d) {
+    var rg = rcRange(d[0]);
+    return '<tr><td>' + esc(d[1]) + '<div class="cfg-when mono">defaults.' + esc(d[0]) + " · " + esc(rg.min) + "–" + esc(rg.max) + "</div></td>" +
+      "<td>" + rcShow(bd[d[0]]) + "</td><td>" + (cd[d[0]] === undefined ? '<span class="muted">未设 = 用内置</span>' : "<b>" + rcShow(cd[d[0]]) + "</b>") + "</td>" +
+      '<td><input id="rcD_' + d[0] + '" type="number" step="' + d[4] + '" placeholder="空 = 用内置" data-style="width:110px"' + actAttr("input", "rcNumCheck", [argStr(d[0])]) + '>' +
+      '<div id="rcD_' + d[0] + '_msg"></div></td>' +
+      '<td class="mob-hide">' + rcChanged("defaults." + d[0]) + "</td></tr>";
+  })).join("");
+  $("rcFlags").innerHTML = head + rows + "</tbody>";
+  // 值用属性赋(不靠 innerHTML 里的 selected):真 DOM 与哨兵的假 DOM 走同一条路
+  RC_FLAGS.forEach(function (f) { var v = cf[f[0]]; $("rcF_" + f[0]).value = v === true ? "1" : v === false ? "0" : ""; });
+  RC_DEFAULTS.forEach(function (d) { var v = cd[d[0]]; $("rcD_" + d[0]).value = v == null ? "" : String(v); $("rcD_" + d[0] + "_msg").innerHTML = ""; });
+  rcPubGate();
+}
+// 数值范围:GET /admin/config 的 remote 元数据给了就用它(remote.ranges.defaults / remote.ranges / remote.limits.defaults,
+// 形状 {min, max} 或 [min, max]);没给就用契约 v0.2 的表(RC_DEFAULTS 第 3、4 格)。
+function rcRange(k) {
+  var r = rcRemote() || {}, d = RC_DEFAULTS.filter(function (x) { return x[0] === k; })[0];
+  var srcs = [r.ranges && r.ranges.defaults, r.ranges, r.limits && r.limits.defaults];
+  for (var i = 0; i < srcs.length; i++) {
+    var m = srcs[i] && srcs[i][k];
+    if (Array.isArray(m) && m.length === 2 && isFinite(Number(m[0])) && isFinite(Number(m[1]))) return { min: Number(m[0]), max: Number(m[1]), from: "server" };
+    if (m && typeof m === "object" && isFinite(Number(m.min)) && isFinite(Number(m.max))) return { min: Number(m.min), max: Number(m.max), from: "server" };
+  }
+  return { min: d[2], max: d[3], from: "contract" };
+}
+// 数值越界 / 不是数字 → 页面直接拦(领导者裁决 2026-09-29):红字写范围,发布按钮禁用,rcPublish 自己再核一次
+function rcNumProblem(k) {
+  var raw = ($("rcD_" + k).value || "").trim(), v = Number(raw), rg = rcRange(k);
+  if (raw === "") return "";
+  if (!isFinite(v)) return "要一个数字(" + rg.min + "–" + rg.max + ")";
+  if (v < rg.min || v > rg.max) return "要在 " + rg.min + "–" + rg.max + " 之间(现在 " + raw + ")";
+  return "";
+}
+function rcNumCheck(k) {
+  var p = rcNumProblem(k);
+  $("rcD_" + k + "_msg").innerHTML = p ? '<p class="err">' + esc(p) + ",不能发布。</p>" : "";
+  rcPubGate();
+}
+function rcNumBlock() {
+  return RC_DEFAULTS.map(function (d) { var p = rcNumProblem(d[0]); return p ? "defaults." + d[0] + " " + p : ""; }).filter(Boolean).join(";");
+}
+function rcPubGate() { $("rcPubBtn").disabled = !!rcNumBlock(); }
+
+function rcStyleText(st) {
+  if (!st || typeof st !== "object") return '<span class="muted">未设 = 用内置</span>';
+  var parts = RC_KNOBS.map(function (k) {
+    var v = st[k[0]]; if (k[0] === "keep_technical") v = v === true ? "1" : v === false ? "0" : v;
+    var o = k[2].filter(function (x) { return x[0] === v; })[0];
+    return o ? o[1] : (v == null ? "—" : String(v));
+  });
+  return esc(parts.join(" · ")) + (st.extra ? '<div class="cfg-diff">extra:「' + esc(st.extra) + "」</div>" : "");
+}
+// 内置那一格:服务端给的是 {text: 生产真正用的那段原文, knobs: 编辑器起始值};老形状(直接是旋钮)也认
+function rcBuiltinStyle(bs, sc) {
+  var b = bs[sc];
+  if (!b || typeof b !== "object") return { text: undefined, knobs: null };
+  if (b.knobs || "text" in b) return { text: b.text, knobs: b.knobs || null };
+  return { text: undefined, knobs: b };
+}
+function rcBuiltinText(b) {
+  if (b.text === null) return '<span class="muted">没有场景风格段(只用通用整理规则)</span>';
+  if (typeof b.text === "string") {
+    var t = b.text.length > 140 ? b.text.slice(0, 140) + "…" : b.text;
+    return '<span title="' + esc(b.text) + '">「' + esc(t) + "」</span>";
+  }
+  return rcStyleText(b.knobs);
+}
+function renderRcStyles() {
+  var cs = rcPart(rcSnap(), "styles"), bs = rcPart(rcBuiltin(), "styles");
+  $("rcStyles").innerHTML = rcSceneList().map(function (s) {
+    var id = "rcSt_" + s[0];
+    return '<div class="rc-scene' + (cs[s[0]] ? "" : " rc-off") + '" id="' + id + '">' +
+      '<div class="rc-head"><b>' + esc(s[1]) + '</b><span class="muted mono">' + esc(s[0]) + "</span>" +
+      '<label class="rc-check"><input type="checkbox" id="' + id + '_on"' + actAttr("change", "rcSceneToggle", [argStr(s[0])]) + '> 远程覆盖这个场景</label>' +
+      '<span data-style="margin-left:auto">' + rcChanged("styles." + s[0]) + "</span></div>" +
+      '<div class="cfg-when">内置:' + rcBuiltinText(rcBuiltinStyle(bs, s[0])) + "</div>" +
+      '<div class="cfg-when">当前远程:' + rcStyleText(cs[s[0]]) + "</div>" +
+      '<div class="rc-knobs">' + RC_KNOBS.map(function (k) {
+        return '<div><label>' + esc(k[1]) + '</label><select id="' + id + "_" + k[0] + '" data-change="rcStylesDirty">' +
+          k[2].map(function (o) { return '<option value="' + o[0] + '">' + esc(o[1]) + "</option>"; }).join("") + "</select></div>";
+      }).join("") + "</div>" +
+      '<div class="rc-extra" data-style="margin-top:8px"><label>补充一行(extra,可空)</label>' +
+      '<input type="text" id="' + id + '_extra" spellcheck="false" placeholder="例:像同事之间的口气"' + actAttr("input", "rcExtraShow", [argStr(s[0])]) + '>' +
+      '<div id="' + id + '_msg"></div></div></div>';
+  }).join("");
+  rcSceneList().forEach(function (s) {
+    var st = cs[s[0]] || rcBuiltinStyle(bs, s[0]).knobs || {};
+    $("rcSt_" + s[0] + "_on").checked = !!cs[s[0]];
+    RC_KNOBS.forEach(function (k) {
+      var v = st[k[0]];
+      if (k[0] === "keep_technical") v = v === true ? "1" : v === false ? "0" : "";
+      $("rcSt_" + s[0] + "_" + k[0]).value = v == null || v === "" ? k[2][0][0] : String(v);
+    });
+    $("rcSt_" + s[0] + "_extra").value = (cs[s[0]] && cs[s[0]].extra) || "";
+  });
+}
+function rcSceneToggle(s) {
+  var on = $("rcSt_" + s + "_on").checked, el = $("rcSt_" + s);
+  if (on) el.classList.remove("rc-off"); else el.classList.add("rc-off");
+  rcStylesDirty();
+}
+
+// extra 的客户端校验:block = 不许发;warn = 黄色提醒、照发
+function rcExtraCheck(s) {
+  s = s == null ? "" : String(s);
+  var out = { block: "", warn: "" };
+  if (Array.from(s).length > RC_EXTRA_MAX) out.block = "超过 " + RC_EXTRA_MAX + " 字(现在 " + Array.from(s).length + ")";
+  else if (/[\r\n\u2028\u2029]/.test(s)) out.block = "不许换行";
+  else if (/[\u0000-\u001f\u007f]/.test(s)) out.block = "不许控制字符";
+  else if (/[{}`]/.test(s)) out.block = "不许花括号 { } 或反引号 `";
+  var m = /ignore|forget|system|assistant/i.exec(s);
+  if (m) out.warn = "含「" + m[0] + "」这类角色词 —— 不拦,但请确认这是在描述风格,不是在改写规则";
+  return out;
+}
+function rcExtraShow(s) {
+  var c = rcExtraCheck($("rcSt_" + s + "_extra").value);
+  $("rcSt_" + s + "_msg").innerHTML = (c.block ? '<p class="err">' + esc(c.block) + "(发布和预览都不会发出)</p>" : "") +
+                                      (c.warn ? '<p class="warnmsg">' + esc(c.warn) + "</p>" : "");
+  rcStylesDirty();
+}
+// 所有覆盖中的场景里,有一条 extra 违规就整份不发;返回违规说明(空 = 可以发)
+function rcExtraBlock() {
+  var bad = [];
+  rcSceneList().forEach(function (s) {
+    if (!$("rcSt_" + s[0] + "_on").checked) return;
+    var c = rcExtraCheck($("rcSt_" + s[0] + "_extra").value);
+    if (c.block) bad.push(s[1] + "(" + s[0] + "):" + c.block);
+    rcExtraShow(s[0]);
+  });
+  return bad.join(";");
+}
+
+function renderRcCopy() {
+  var cc = rcPart(rcSnap(), "copy"), bc = rcPart(rcBuiltin(), "copy");
+  function txt(o, lang) { return o && typeof o === "object" ? o[lang] : o === null ? null : (lang === "zh" ? o : undefined); }
+  $("rcCopy").innerHTML = "<thead><tr><th>文案</th><th>内置默认</th><th>当前远程</th><th>新值</th><th class=\"mob-hide\">最后改动</th></tr></thead><tbody>" +
+    RC_COPY.map(function (c) {
+      var b = bc[c[0]], v = cc[c[0]];
+      return "<tr><td>" + esc(c[1]) + '<div class="cfg-when mono">copy.' + esc(c[0]) + "</div></td>" +
+        '<td class="cfg-diff">中:' + rcShow(txt(b, "zh")) + "<br>英:" + rcShow(txt(b, "en")) + "</td>" +
+        '<td class="cfg-diff">' + (v === undefined ? '<span class="muted">未设 = 用内置</span>' : "<b>中:" + rcShow(txt(v, "zh")) + "<br>英:" + rcShow(txt(v, "en")) + "</b>") + "</td>" +
+        '<td><input type="text" id="rcC_' + c[0] + '_zh" maxlength="200" placeholder="中文(空 = 用内置)">' +
+        '<input type="text" id="rcC_' + c[0] + '_en" maxlength="200" placeholder="English" data-style="margin-top:6px"></td>' +
+        '<td class="mob-hide">' + rcChanged("copy." + c[0]) + "</td></tr>";
+    }).join("") + "</tbody>";
+  RC_COPY.forEach(function (c) {
+    var v = cc[c[0]];
+    $("rcC_" + c[0] + "_zh").value = (txt(v, "zh") || "");
+    $("rcC_" + c[0] + "_en").value = (txt(v, "en") || "");
+  });
+}
+
+// 表单 → 候选快照(只放设了的键;空 = 不下发 = 客户端用内置)
+function rcCandidateStyles() {
+  var out = {};
+  rcSceneList().forEach(function (s) {
+    if (!$("rcSt_" + s[0] + "_on").checked) return;
+    var st = {};
+    RC_KNOBS.forEach(function (k) {
+      var v = $("rcSt_" + s[0] + "_" + k[0]).value;
+      st[k[0]] = k[0] === "keep_technical" ? v === "1" : v;
+    });
+    var ex = $("rcSt_" + s[0] + "_extra").value || "";
+    if (ex !== "") st.extra = ex;                      // ⛔ 不 trim:换行要原样被校验看见
+    out[s[0]] = st;
+  });
+  return out;
+}
+function rcCandidate() {
+  var flags = {}, defaults = {}, copy = {};
+  RC_FLAGS.forEach(function (f) { var v = $("rcF_" + f[0]).value; if (v === "1") flags[f[0]] = true; else if (v === "0") flags[f[0]] = false; });
+  RC_DEFAULTS.forEach(function (d) {
+    var raw = ($("rcD_" + d[0]).value || "").trim();
+    if (raw !== "") defaults[d[0]] = Number(raw);                  // 不是数字 / 越界已被 rcNumBlock 拦在发布之前
+  });
+  RC_COPY.forEach(function (c) {
+    var zh = $("rcC_" + c[0] + "_zh").value || "", en = $("rcC_" + c[0] + "_en").value || "";
+    if (zh !== "" || en !== "") copy[c[0]] = { zh: zh, en: en };
+  });
+  return { flags: flags, defaults: defaults, styles: rcCandidateStyles(), copy: copy };
+}
+// 改了哪些:按「块.键」逐条比
+function rcDiff(cur, cand) {
+  var out = [];
+  ["flags", "defaults", "styles", "copy"].forEach(function (part) {
+    var a = rcPart(cur, part), b = rcPart(cand, part), keys = {};
+    Object.keys(a).concat(Object.keys(b)).forEach(function (k) { keys[k] = 1; });
+    Object.keys(keys).sort().forEach(function (k) {
+      if (rcStable(a[k]) !== rcStable(b[k])) out.push(part + "." + k + (b[k] === undefined ? "(删掉 → 用内置)" : ""));
+    });
+  });
+  return out;
+}
+
+function rcStylesDirty() {
+  if (rcPreviewSig != null && rcPreviewSig !== rcStable(rcCandidateStyles())) {
+    $("rcPreviewMsg").innerHTML = '<p class="warnmsg">预览之后场景风格又改过 —— 下面的结果是旧候选的,重新预览再看。</p>';
+  }
+}
+
+// 服务端拒绝的原文:message / code / details 原样摆出来(转义),不翻译、不删减
+function rcServerErr(res) {
+  var j = res.j || {}, code = j.error && typeof j.error === "object" ? j.error.code : (j.code || "");
+  if (res.status === 409 || code === "stale") return "配置已被后来的改动更新,刷新后再试。";
+  var det = (j.error && typeof j.error === "object" && (j.error.details || j.error.errors)) || j.invalid || j.details || j.errors;
+  var d = ""; if (det != null) { try { d = typeof det === "string" ? det : JSON.stringify(det); } catch (e) { d = String(det); } }
+  return "服务端拒绝了(HTTP " + res.status + "):" + cfgErrText(j, res.status) + (d ? "\n" + d : "");
+}
+
+function rcPublish() {
+  if (!rcLive()) return;
+  var bad = [rcNumBlock(), rcExtraBlock()].filter(Boolean).join(";");
+  rcPubGate();
+  if (bad) { cfgMsg("rcPub", "err", "没发:" + esc(bad)); return; }
+  var cand = rcCandidate(), diff = rcDiff(rcSnap(), cand), cur = rcRev();
+  if (!diff.length) { cfgMsg("rcPub", "note", "和当前 revision " + esc(cur) + " 一样,没什么可发布的。"); return; }
+  if (!confirm("发布 revision " + (cur == null ? "?" : cur + 1) + "?\n\n改了 " + diff.length + " 项:\n  " + diff.join("\n  ") +
+               "\n\n0.53 及以上的客户端下一次刷新 / 下一次听写吃到;非法值服务端会整次拒绝。")) return;
+  var body = { expect_revision: cur, note: ($("rcNote").value || "").trim(), config: cand };
+  cfgMsg("rcPub", "note", "发布中…");
+  return cfgPost("remote", body).then(function (res) {
+    if (!cfgClean(res.j)) { cfgMsg("rcPub", "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("远程配置发布回包"); return; }
+    if (!res.ok || (res.j && res.j.ok === false)) {
+      $("rcPubMsg").innerHTML = '<p class="err" data-style="white-space:pre-wrap">' + esc(rcServerErr(res)) + "<br>(整次没发布,什么都没改)</p>";
+      return;
+    }
+    var nr = res.j && (res.j.revision != null ? res.j.revision : res.j.remote && res.j.remote.revision);
+    cfgMsg("rcPub", "okmsg", "发布了" + (nr != null ? " revision " + esc(nr) : "") + "(" + diff.length + " 项)。客户端下一次刷新吃到;改动告警信已登记。");
+    var ws = (res.j && res.j.warnings) || [];
+    if (ws.length) $("rcPubMsg").innerHTML += '<p class="warnmsg">服务端告警(没拦):' +
+      esc(ws.map(function (w) { return (w.path || "") + "「" + (w.word || "") + "」"; }).join("、")) + "</p>";
+    load();
+  }).catch(function (e) { cfgMsg("rcPub", "err", esc(e.message)); });
+}
+
+function rcRollback() {
+  var cur = rcRev(), prev = rcPrevRevision();
+  if (cur == null || prev == null) { cfgMsg("rcHist", "err", "没有更早的版本可回。"); return; }
+  if (!confirm("回退 revision " + cur + "?\n\n会用 r" + prev + " 的快照生成一个新的 revision " + (cur + 1) + "(历史不改写)。")) return;
+  return cfgPost("remote/rollback", { expect_revision: cur, to_revision: prev }).then(function (res) {
+    if (!cfgClean(res.j)) { cfgMsg("rcHist", "err", "回包里疑似有密钥,已拒绝显示。"); cfgRaiseAlarm("远程配置回退回包"); return; }
+    if (!res.ok || (res.j && res.j.ok === false)) { $("rcHistMsg").innerHTML = '<p class="err" data-style="white-space:pre-wrap">' + esc(rcServerErr(res)) + "</p>"; return; }
+    cfgMsg("rcHist", "okmsg", "回退了:现在是 r" + prev + " 的内容" + (res.j && res.j.revision != null ? "(新 revision " + esc(res.j.revision) + ")" : "") + "。");
+    load();
+  }).catch(function (e) { cfgMsg("rcHist", "err", esc(e.message)); });
+}
+
+// 预览:候选 styles × 5 条固定样例,服务端跑与生产一致的组装路径。
+// ⛔ 结果只画进 #rcPreview:不存全局变量、不进 localStorage(换一页 / 刷新就没了,本来就只是给人眼看一次)。
+function rcPreview() {
+  if (!rcLive()) return;
+  var bad = rcExtraBlock();
+  if (bad) { cfgMsg("rcPreview", "err", "没发:" + esc(bad)); return; }
+  var styles = rcCandidateStyles(), sig = rcStable(styles);
+  $("rcPreviewBtn").disabled = true;
+  cfgMsg("rcPreview", "note", "预览中…(真打模型,最多 10 秒;每分钟最多 6 次)");
+  $("rcPreview").innerHTML = "";
+  return apiFetch(API + "/admin/config/remote/preview", { method: "POST", body: JSON.stringify({ styles: styles }) })
+    .then(cfgJson)
+    .then(function (res) {
+      $("rcPreviewBtn").disabled = false;
+      // 服务端只要有一条样例失败就回 ok:false,但其余几条照样有结果 → HTTP 200 就照画,逐条标错
+      if (!res.ok) {
+        $("rcPreviewMsg").innerHTML = '<p class="err" data-style="white-space:pre-wrap">预览没跑成:' + esc(rcServerErr(res)) + "</p>";
+        return;
+      }
+      var rows = (res.j && (res.j.samples || res.j.results)) || [];
+      rcPreviewSig = sig;
+      $("rcPreviewMsg").innerHTML = "";
+      // 免责标签和结果放在同一格:结果在,标签就在(预览后又改了候选,上面那格换成「结果是旧的」,这里不动)
+      $("rcPreview").innerHTML = '<p class="note"><span class="rc-preview-tag">只供人眼看,不是质量证明</span> ' +
+        "用的是上面这份<b>候选</b>(还没发布)。" + (res.j && res.j.cost_micro_usd != null ? " 这次花了 " + esc(usd(res.j.cost_micro_usd)) + "。" : "") +
+        (res.j && res.j.spent_today_micro_usd != null && res.j.budget_micro_usd != null
+          ? " 今天预览已花 " + esc(usd(res.j.spent_today_micro_usd)) + " / " + esc(usd(res.j.budget_micro_usd)) + "。" : "") + "</p>" +
+        (!rows.length ? '<p class="muted">服务端没回样例结果。</p>' : '<div class="tablebox"><table class="mini"><thead><tr><th>场景</th><th>样例(原话)</th><th>候选整理结果</th></tr></thead><tbody>' +
+        rows.map(function (x) {
+          var bad = x.ok === false || !!x.error;
+          return '<tr' + (bad ? ' class="bad"' : "") + '><td class="mono">' + esc(x.scene || "—") +
+            (x.style_source ? '<div class="cfg-when">' + (x.style_source === "candidate" ? "候选风格" : "内置风格") + "</div>" : "") + "</td>" +
+            '<td class="cfg-diff">' + esc(x.input || x.sample || "") + "</td>" +
+            '<td class="cfg-diff">' + (bad ? "出错:" + esc(x.error || "失败") : esc(x.output || "")) +
+            (x.latency_ms != null ? ' <span class="cfg-when">' + esc(x.latency_ms) + " ms</span>" : "") + "</td></tr>";
+        }).join("") + "</tbody></table></div>");
+    })
+    .catch(function (e) { $("rcPreviewBtn").disabled = false; cfgMsg("rcPreview", "err", "预览没打出去:" + esc(e.message)); });
+}
+
+
+// ── SEC-M8:CSP 去掉 unsafe-inline 之后的事件与内联样式(2026-10-08)────────────────────────
+// 页面上不再有 onclick= / oninput= / onchange= 与 style= 属性(CSP 会把它们全部挡掉)。
+//   事件:元素写 data-click / data-change / data-input = 函数名,参数放 data-args(JSON 数组),
+//         data-this="1" 表示把元素本身当第一个参数;document 上三个委托监听按名单(ACTION_NAMES)分派。
+//   样式:元素写 data-style,载入时与之后每次插入 DOM 时经 CSSOM(el.style.cssText)套上 —— CSSOM 不受 style-src 管。
+// ⛔ 名单外的名字一律不调(属性只来自本文件的模板,名单是第二道闸)。
+// 以前内联写法里带引号的参数(onclick="f('x')")到函数里都是字符串;照旧:null → "",其余 String()。
+function argStr(s) { return s == null ? "" : String(s); }
+function actAttr(type, fn, args) {
+  return ' data-' + type + '="' + fn + '"' + (args && args.length ? ' data-args="' + esc(JSON.stringify(args)) + '"' : "");
+}
+var ACTION_NAMES = ["accessAct", "cfgDirty", "cfgKeyApply", "cfgKeyDirty", "cfgKeyProbe", "cfgPriceApply", "cfgProvApply", "cfgProvClose", "cfgProvEdit", "cfgProvProbe", "cfgRollback", "cfgTierApply", "cfgTierClose", "cfgTierEdit", "cfgTierProbe", "closeDrawer", "doAction", "grantSeat", "load", "logout", "mintInvite", "rcExtraShow", "rcNumCheck", "rcPreview", "rcPublish", "rcRollback", "rcSceneToggle", "rcStylesDirty", "reconcile", "revokeInvite", "toggleHash"];
+function dispatchAct(type, e) {
+  var el = e && e.target && e.target.closest ? e.target.closest("[data-" + type + "]") : null;
+  if (!el) return;
+  var name = el.getAttribute("data-" + type);
+  if (ACTION_NAMES.indexOf(name) < 0 || typeof window[name] !== "function") return;
+  var args;
+  try { args = JSON.parse(el.getAttribute("data-args") || "[]"); } catch (x) { return; }
+  if (!Array.isArray(args)) return;
+  if (el.getAttribute("data-this") === "1") args.unshift(el);
+  window[name].apply(el, args);
+}
+["click", "change", "input"].forEach(function (type) {
+  document.addEventListener(type, function (e) { dispatchAct(type, e); });
+});
+function applyDataStyles(root) {
+  if (!root || root.nodeType !== 1) return;
+  if (root.hasAttribute && root.hasAttribute("data-style")) root.style.cssText = root.getAttribute("data-style");
+  var list = root.querySelectorAll ? root.querySelectorAll("[data-style]") : [];
+  for (var i = 0; i < list.length; i++) list[i].style.cssText = list[i].getAttribute("data-style");
+}
+if (typeof MutationObserver !== "undefined" && document.body) {
+  applyDataStyles(document.body);
+  new MutationObserver(function (muts) {
+    muts.forEach(function (m) { for (var i = 0; i < m.addedNodes.length; i++) applyDataStyles(m.addedNodes[i]); });
+  }).observe(document.body, { childList: true, subtree: true });
+}

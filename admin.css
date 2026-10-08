@@ -1,0 +1,237 @@
+:root {
+  --bg: #F7F7F8; --card: #FFFFFF; --sunk: #F0F0F2;
+  --ink: #1B1B1F; --second: #55555C; --faint: #8E8E96;
+  --line: #E9E9EC; --line2: #D6D6DC;
+  --coral: #E2531F; --coral-tint: #FBEFE9;
+  --warn: #96570A; --warn-tint: #FAF2E0;
+  --stop: #A62B1B; --stop-tint: #FBE9E6;
+  --green: #2E7D4F; --green-tint: #E6F1EA;
+  --asr: #E2531F; --llm: #3667C9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161618; --card: #1E1E21; --sunk: #232327;
+    --ink: #F2F2F4; --second: #A0A0A8; --faint: #6E6E76;
+    --line: #2C2C31; --line2: #3A3A41;
+    --coral: #FF6B35; --coral-tint: #3A2118;
+    --warn: #D9A441; --warn-tint: #2B2416;
+    --stop: #E8796A; --stop-tint: #33201D;
+    --green: #5FBF87; --green-tint: #1C2A21;
+    --asr: #ED6234; --llm: #5583DB;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 26px 20px 80px; }
+
+/* ── 顶栏 ─────────────────────────────────────────── */
+.topbar { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 9px; }
+.brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--coral); flex: none; }
+.brand .name { font: 600 20px/1 Georgia, "Songti SC", serif; }
+.brand .tag { font-size: 11px; color: var(--faint); letter-spacing: .06em; text-transform: uppercase; margin-left: 4px; }
+.who { color: var(--faint); font-size: 12px; display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+.who b { color: var(--second); font-weight: 500; }
+.linkbtn { background: none; border: none; color: var(--second); font-size: 12px; cursor: pointer; padding: 0; font-family: inherit; }
+.linkbtn:hover { color: var(--coral); }
+
+/* ── 卡片与栅格 ───────────────────────────────────── */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+.section { margin-bottom: 22px; }
+.eyebrow { font-size: 11px; letter-spacing: .06em; color: var(--faint); margin-bottom: 10px; text-transform: uppercase; }
+.eyebrow b { color: var(--second); font-weight: 500; text-transform: none; letter-spacing: 0; font-size: 12.5px; }
+.grid { display: grid; gap: 12px; }
+.g6 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+
+.stat .num { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.5px; line-height: 1.1; }
+.stat .lbl { font-size: 11.5px; color: var(--faint); margin-bottom: 6px; }
+.stat .sub { font-size: 11.5px; color: var(--faint); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+/* ── 表 ───────────────────────────────────────────── */
+.tablebox { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-size: 11px; letter-spacing: .04em; color: var(--faint); font-weight: 500;
+     padding: 4px 10px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--coral); }
+th .arrow { opacity: .5; font-size: 9px; }
+td { padding: 9px 10px; font-size: 13px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: none; }
+tbody tr.clickable { cursor: pointer; }
+tbody tr.clickable:hover td { background: var(--sunk); }
+td.num, th.num { text-align: right; }
+
+/* ── 标记 ─────────────────────────────────────────── */
+.chip { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--line2); color: var(--second); white-space: nowrap; }
+.chip.pro { border-color: var(--coral); color: var(--coral); }
+.chip.dev { border-color: var(--llm); color: var(--llm); }
+.chip.banned { border-color: var(--stop); color: var(--stop); background: var(--stop-tint); }
+.chip.ok { border-color: var(--green); color: var(--green); }
+.chip.risk { border-color: var(--warn); color: var(--warn); background: var(--warn-tint); }
+/* 可疑 IP 的 hmac 哈希:默认短串,点开是全串 —— 全串 64 位要能折行,别把表撑出屏 */
+code.hash { cursor: pointer; word-break: break-all; }
+
+.bar-track { width: 96px; height: 5px; border-radius: 99px; background: var(--line); overflow: hidden; display: inline-block; vertical-align: middle; }
+.bar-fill { height: 100%; border-radius: 99px; background: var(--coral); min-width: 2px; }
+.bar-fill.hot { background: var(--warn); }
+.bar-fill.over { background: var(--stop); }
+.muted { color: var(--faint); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+/* ── 异常信号:必须刺眼,但不许铺满 ───────────────── */
+.alarm { border-color: var(--warn); background: var(--warn-tint); }
+.alarm.high { border-color: var(--stop); background: var(--stop-tint); }
+.alarm-row { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,.16); flex-wrap: wrap; }
+.alarm-row:last-child { border-bottom: none; }
+.alarm-row .sig { font-weight: 600; font-size: 13px; }
+.alarm-row .who2 { font-size: 12.5px; }
+.alarm-row .det { font-size: 12px; color: var(--second); }
+
+/* ── 图 ───────────────────────────────────────────── */
+.chart-box { position: relative; }
+.chart-svg { width: 100%; height: 170px; display: block; }
+.legend { display: flex; gap: 16px; font-size: 12px; color: var(--second); margin-top: 8px; flex-wrap: wrap; }
+.legend .key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--bg);
+       font-size: 12px; padding: 6px 10px; border-radius: 8px; white-space: pre; display: none;
+       transform: translate(-50%, -112%); font-variant-numeric: tabular-nums; z-index: 5; }
+
+/* 功能排行的横条 */
+.rank-row { display: grid; grid-template-columns: 84px 1fr 90px; gap: 10px; align-items: center; padding: 6px 0; }
+.rank-bar { height: 18px; border-radius: 5px; background: var(--coral); opacity: .82; min-width: 2px; }
+.rank-row .n { text-align: right; font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--second); }
+
+/* ── 抽屉 ─────────────────────────────────────────── */
+.scrim { position: fixed; inset: 0; background: rgba(0,0,0,.34); display: none; z-index: 40; }
+.drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(460px, 100vw);
+  background: var(--card); border-left: 1px solid var(--line);
+  padding: 22px 22px 40px; overflow-y: auto; display: none; z-index: 41;
+}
+.drawer h3 { font-size: 17px; font-weight: 600; margin-bottom: 2px; word-break: break-all; }
+/* ⚠️ .kv 必须是**全局**类,不能写成 .drawer .kv —— 上游 API 那一块在抽屉外面
+   也用它。第一版锁在 .drawer 里,结果那几行完全没有布局,
+   「Soniox 本月$0.3230」「stt-rt-v5241 次」全挤成一坨。注入假数据渲染时抓到的。 */
+.kv { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0;
+      border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.kv:last-of-type { border-bottom: none; }
+.kv .k { color: var(--faint); }
+.kv .v { text-align: right; font-variant-numeric: tabular-nums; }
+.act { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line2); }
+.act h4 { font-size: 12px; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 10px; }
+input[type=text], input[type=email], input[type=number], input[type=password], select, textarea {
+  width: 100%; background: var(--bg); color: var(--ink);
+  border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px;
+  font: inherit; font-size: 13px; margin-bottom: 8px;
+}
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--coral); outline-offset: 1px; }
+.btn { border: none; border-radius: 99px; padding: 8px 16px; font: inherit; font-size: 13px;
+       font-weight: 500; cursor: pointer; background: var(--coral); color: #fff; }
+.btn:hover { filter: brightness(1.06); }
+.btn[disabled] { opacity: .45; cursor: default; filter: none; }
+.btn.quiet { background: var(--sunk); color: var(--second); }
+.btn.danger { background: var(--stop); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.note { font-size: 11.5px; color: var(--faint); margin-top: 6px; line-height: 1.6; }
+.err { color: var(--stop); font-size: 12.5px; margin-top: 8px; }
+.okmsg { color: var(--green); font-size: 12.5px; margin-top: 8px; }
+
+/* ── 筛选条 ───────────────────────────────────────── */
+.filters { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.filters input[type=text] { width: 220px; margin-bottom: 0; }
+.tab { border: 1px solid var(--line2); background: none; color: var(--second);
+       border-radius: 99px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+.tab.on { border-color: var(--coral); color: var(--coral); background: var(--coral-tint); }
+
+/* ── 申请名额:待处理角标 ──────────────────────────
+   放在顶栏而不是只放在那一节的标题上:有人在等回音这件事,不该要求你先滚到第三屏。 */
+.navbadge { display: inline-flex; align-items: baseline; gap: 6px; text-decoration: none;
+            border: 1px solid var(--coral); background: var(--coral-tint); color: var(--coral);
+            border-radius: 99px; padding: 3px 11px; font-size: 12px; }
+.navbadge b { color: var(--coral); font-weight: 600; }
+.accrow.new td { background: var(--coral-tint); }
+/* 两个按钮挤成两行、「但已有账号」被折成两截 —— 都是这一栏最后一列太窄闹的 */
+.accrow td.acc-act, .accrow td.acc-seat { white-space: nowrap; }
+.accrow td.acc-act .btn { padding: 6px 12px; }
+.access-note { max-width: 46ch; white-space: pre-wrap; word-break: break-word; }
+
+/* ── 登录 ─────────────────────────────────────────── */
+.gate { max-width: 380px; margin: 12vh auto; }
+.gate h2 { font: 600 19px/1.3 Georgia, "Songti SC", serif; margin-bottom: 4px; }
+.hidden { display: none !important; }
+@media (max-width: 640px) { .wrap { padding: 18px 14px 60px; } .stat .num { font-size: 22px; } }
+
+/* ── 后台 v2(2026-09-17):生命周期 / 警报降噪 / 手机宽度 ─────────────
+   这一页原来是**账本视图**:每个人有花了多少、签了几把 key。缺的是创始人真正
+   要看的那件事 —— 这个人从哪来、走到哪一步。下面三组样式各对应一件:
+   .tl-*(抽屉里的时间线)、.calmcard/.hint(对上账的警报不再飘红、每条说人话)、
+   ≤520px(手机上能看)。 */
+.src { font-size: 11px; margin-top: 1px; white-space: nowrap; }
+.alarm-row .hint { flex: 1 0 100%; font-size: 11.5px; color: var(--second); line-height: 1.6; }
+.calmcard { background: var(--sunk); border-color: var(--line); margin-top: 10px; }
+.calmcard .calmhead { font-size: 11.5px; color: var(--faint); margin-bottom: 4px; }
+.calmcard .alarm-row .sig { font-weight: 500; color: var(--second); }
+
+.tl-row { display: grid; grid-template-columns: 72px 1fr auto; gap: 10px; align-items: baseline;
+          padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.tl-row:last-child { border-bottom: none; }
+.tl-row .step { color: var(--faint); }
+.tl-row .day { color: var(--faint); font-variant-numeric: tabular-nums; font-size: 11.5px; }
+.tl-sum { font-size: 12.5px; color: var(--second); margin-top: 12px; line-height: 1.7; }
+
+/* 手机:一屏宽 390。⛔ 不是把表横着滚 —— 要能一眼扫完,所以次要列直接不画。 */
+@media (max-width: 520px) {
+  .wrap { padding: 16px 12px 56px; }
+  .topbar { gap: 8px 12px; margin-bottom: 18px; }
+  /* 第一行 = 品牌 + 待处理角标;第二行 = 账号 / 刷新 / 退出 */
+  .who { flex: 1 0 100%; justify-content: flex-start; gap: 12px; }
+  .g6 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat .num { font-size: 20px; }
+  .mob-hide { display: none !important; }
+  .card { padding: 14px 12px; }
+  /* 表在手机上要**能扫完**,不是能横着滚。所以:字小一号、留白收紧、
+     长邮箱允许硬断行(不断的话它一个人就把整张表撑出屏幕,后面五列全滚没了)。 */
+  table { font-size: 12px; }
+  td { padding: 8px 4px; font-size: 12px; }
+  th { padding: 4px 4px 7px; }
+  .mono { font-size: 11px; }
+  #users td:first-child, #accessTable td.mono { word-break: break-all; }
+  .chip { padding: 1px 6px; }
+  .filters input[type=text] { width: 100%; }
+}
+/* ── 配置(2026-09-29):模型与供应商 / 密钥 / 单价 ─────────────────
+   「试打」没过,「生效」就是灰的 —— 按钮状态本身就是那条规矩。 */
+.cfg-form { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line2); }
+.cfg-form label { display: block; font-size: 11.5px; color: var(--faint); margin-bottom: 3px; }
+.cfg-form .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.cfg-when { font-size: 11px; color: var(--faint); }
+.cfg-diff { max-width: 52ch; word-break: break-all; white-space: pre-wrap; }
+#cfgSec .grid > .card { min-width: 0; }            /* 网格项默认 min-width:auto,宽表会把卡片撑出屏 */
+#cfgSec td .btn { white-space: nowrap; padding: 6px 12px; }
+.cfg-form label { word-break: break-word; }
+@media (max-width: 520px) { .cfg-form .two { grid-template-columns: 1fr; } .cfg-diff { max-width: 22ch; } }
+table.mini{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px}
+table.mini th,table.mini td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line,#e6e6e6);vertical-align:top}
+table.mini tr.bad td{color:#b0392a}
+/* ── 远程配置(2026-09-30):开关与默认值 / 场景风格 / 文案 ───────── */
+.warnmsg { color: var(--warn); font-size: 12.5px; margin-top: 6px; }
+.chip.pub { border-color: var(--llm); color: var(--llm); }
+.rc-scene { padding: 10px 0; border-top: 1px solid var(--line); }
+.rc-scene:first-child { border-top: none; }
+.rc-scene .rc-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.rc-knobs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0 10px; margin-top: 8px; }
+.rc-knobs label, .rc-extra label { display: block; font-size: 11.5px; color: var(--faint); margin-bottom: 3px; }
+.rc-knobs select { width: 100%; }
+.rc-extra input { width: 100%; }
+.rc-off .rc-knobs, .rc-off .rc-extra { display: none; }
+.rc-check { font-size: 12.5px; color: var(--second); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.rc-check input { margin: 0; }
+#rcSec input[type=text], #rcSec input[type=number], #rcSec select { margin-bottom: 0; }
+#rcSec td input[type=text] { width: 100%; min-width: 14ch; }
+.rc-preview-tag { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 99px; background: var(--warn-tint); color: var(--warn); }
+@media (max-width: 720px) { .rc-knobs { grid-template-columns: 1fr 1fr; } }

@@ -2,13 +2,25 @@
 // 把 index.html 里那段 <script> 抽出来,喂给一个极小的假 DOM + 假 fetch,
 // 记录调用顺序 —— 要证明的东西全在「谁先被打、带的是哪张 token」里。
 import fs from "node:fs";
+import path from "node:path";
 import vm from "node:vm";
 
-const HTML = fs.readFileSync(process.argv[2] || "index.html", "utf8");
-const m = HTML.match(/<script>\n([\s\S]*?)\n<\/script>/);
-if (!m) { console.error("没找到 <script> 块"); process.exit(1); }
-const CODE = m[1];
-fs.writeFileSync("/tmp/murmur-admin-harness-extracted.js", CODE);
+// SEC-M8(2026-10-08):脚本搬进了 admin.js(CSP 不放 unsafe-inline)。页面引用了外链脚本就读那份;
+//   还是内联的旧页面照旧抽 <script> 块。
+const HTML_PATH = process.argv[2] || "index.html";
+const HTML = fs.readFileSync(HTML_PATH, "utf8");
+const srcRef = HTML.match(/<script src="([^"]+)"><\/script>/);
+const m = srcRef ? null : HTML.match(/<script>\n([\s\S]*?)\n<\/script>/);
+if (!srcRef && !m) { console.error("没找到 <script> 块,也没有 <script src>"); process.exit(1); }
+const JS_PATH = srcRef ? path.join(path.dirname(HTML_PATH), srcRef[1]) : null;
+const CODE = srcRef ? fs.readFileSync(JS_PATH, "utf8") : m[1];
+
+// SEC-M8:按钮不再写 onclick="fn('x')"(CSP 去掉 unsafe-inline 后内联事件全被挡),改成 data-click="fn" data-args="[…]"。
+// 下面几条「某一行有 / 没有某个按钮」的断言契约没变,只是按钮在 HTML 里的写法变了:旧探针找 "cfgRollback('11')",
+// 新写法里这个串不再出现 —— 不改的话「有按钮」会假红、「没按钮」会恒真。btnSig 按 admin.js 的 actAttr 同一套转义生成新写法再找。
+const htmlEsc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const btnSig = (fn, ...args) => 'data-click="' + fn + '"' + (args.length ? ' data-args="' + htmlEsc(JSON.stringify(args)) + '"' : "");
+const btnCount = (html, sig) => html.split(sig).length - 1;
 
 const TOK = "https://syebvkwemxwxkonvsyjd.supabase.co/auth/v1/token";
 const STATS = "/admin/stats", ACC = "/admin/access-requests";
@@ -30,10 +42,12 @@ function makeEl(id) {
   return el;
 }
 
-function run(name, { session, serverExpired, statsAlways401, refreshFails, retryStill401 }) {
+function run(name, { session, serverExpired, statsAlways401, refreshFails, retryStill401, legacy }) {
   const log = [];
-  const store = new Map();
+  const store = new Map();                 // sessionStorage(SEC-M8 起会话只放这里)
+  const legacyStore = new Map();           // localStorage(旧版本页面存会话的地方)
   if (session) store.set("murmur.admin.session", JSON.stringify(session));
+  if (legacy) legacyStore.set("murmur.admin.session", JSON.stringify(legacy));
   const els = new Map();
   const $ = id => { if (!els.has(id)) els.set(id, makeEl(id)); return els.get(id); };
 
@@ -81,9 +95,13 @@ function run(name, { session, serverExpired, statsAlways401, refreshFails, retry
     HOST: undefined, addEventListener: () => {}, setTimeout, clearTimeout,
     Promise, JSON, Math, Date, Number, String, Object, Array, isNaN, console, encodeURIComponent,
     fetch: fetchStub,
-    localStorage: {
+    sessionStorage: {
       getItem: k => (store.has(k) ? store.get(k) : null),
       setItem: (k, v) => store.set(k, v), removeItem: k => store.delete(k),
+    },
+    localStorage: {
+      getItem: k => (legacyStore.has(k) ? legacyStore.get(k) : null),
+      setItem: (k, v) => legacyStore.set(k, v), removeItem: k => legacyStore.delete(k),
     },
     location: { reload: () => log.push("location.reload()") },
     prompt: () => null, alert: () => {},
@@ -100,7 +118,7 @@ function run(name, { session, serverExpired, statsAlways401, refreshFails, retry
     const drain = () => (++ticks > 40 ? finish() : setTimeout(drain, 0));
     const finish = () => {
       const saved = store.get("murmur.admin.session");
-      resolve({ name, log, refreshes,
+      resolve({ name, log, refreshes, legacyLeft: legacyStore.size,
         gateShown: $("gate")._cls.has("hidden") === false,
         mainHidden: $("main")._cls.has("hidden"),
         saved: saved ? JSON.parse(saved) : null });
@@ -279,7 +297,8 @@ async function cfgWorld(routes, opt = {}) {
     addEventListener: () => {}, setTimeout, clearTimeout,
     Promise, JSON, Math, Date, Number, String, Object, Array, isNaN, isFinite, RegExp, console: cons, encodeURIComponent,
     fetch: fetchStub,
-    localStorage: { getItem: k => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) },
+    sessionStorage: { getItem: k => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: k => store.delete(k) },
+    localStorage: { getItem: () => null, setItem: (k, v) => store.set("LOCAL:" + k, String(v)), removeItem: () => {} },
     location: { reload: () => {}, href: "https://example.com/murmur-admin/" },
     prompt: () => null, alert: m => out.push("alert " + m),
     confirm: m => { confirms.push(m); return st.confirm; },
@@ -308,7 +327,7 @@ async function cfgWorld(routes, opt = {}) {
 // 在全局变量里深搜一个串(跳过函数与宿主对象,防环)
 function deepHas(root, needle) {
   const seen = new Set();
-  const skip = new Set(["window", "document", "localStorage", "fetch", "console", "location", "Promise", "JSON", "Math",
+  const skip = new Set(["window", "document", "localStorage", "sessionStorage", "fetch", "console", "location", "Promise", "JSON", "Math",
                         "Date", "Number", "String", "Object", "Array", "RegExp", "setTimeout", "clearTimeout"]);
   function walk(v, d) {
     if (v == null || d > 6) return false;
@@ -420,10 +439,11 @@ const CFG_CASES = [
   ["k) 回退:配置行有按钮、密钥行没有;回退发的是那一行的 audit_id", async () => {
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/rollback": () => [200, { ok: true }] });
     const html = w.$("cfgAudit").innerHTML;
-    const r = [[html.includes("cfgRollback('11')"), "config.model 行有「回退到这一版」"],
-               [!html.includes("cfgRollback('12')"), "config.key 行没有回退按钮"],
-               [!html.includes("cfgRollback('13')"), "config.probe 行(没有 before)没有回退按钮"],
-               [!html.includes("cfgRollback('10')") && html.includes("之后又改过"), "不是最新那条(config_version 6 ≠ 当前 7)→ 没有回退按钮,写「之后又改过」"],
+    const r = [[html.includes(btnSig("cfgRollback", "11")), "config.model 行有「回退到这一版」"],
+               [!html.includes(btnSig("cfgRollback", "12")), "config.key 行没有回退按钮"],
+               [!html.includes(btnSig("cfgRollback", "13")), "config.probe 行(没有 before)没有回退按钮"],
+               [btnCount(html, 'data-click="cfgRollback"') === 1, "整张留痕表恰好一个回退按钮(只有 11)"],
+               [!html.includes(btnSig("cfgRollback", "10")) && html.includes("之后又改过"), "不是最新那条(config_version 6 ≠ 当前 7)→ 没有回退按钮,写「之后又改过」"],
                [w.$("cfgTiers").innerHTML.includes("config.model"), "「高级」档那一行显示了最后一条改动"]];
     await w.call("cfgRollback", "12");
     r.push([w.posts("/admin/config/rollback").length === 0, "硬调密钥行的回退 → 不发"]);
@@ -446,7 +466,7 @@ const CFG_CASES = [
     const w = await cfgWorld({ "/admin/config": () => [200, cfgFixture()], "/admin/config/probe": () => [200, { ok: true, latency_ms: 300 }],
                                "/admin/config/provider": () => [200, { ok: true }] });
     const tbl = w.$("cfgProviders").innerHTML;
-    const r = [[!tbl.includes("cfgProvEdit('soniox')") && tbl.includes("cfgProvEdit('deepseek')"), "识别底座(asr 行)没有「编辑」(服务端 asr_locked),llm 行有"]];
+    const r = [[!tbl.includes(btnSig("cfgProvEdit", "soniox")) && tbl.includes(btnSig("cfgProvEdit", "deepseek")), "识别底座(asr 行)没有「编辑」(服务端 asr_locked),llm 行有"]];
     await w.call("cfgProvEdit", "openrouter");
     const form = w.$("cfgProvForm").innerHTML;
     const dsel = (form.match(/<select id="cfgProvDialect"[\s\S]*?<\/select>/) || [""])[0];
@@ -641,9 +661,9 @@ const CFG_CASES = [
     const w = await cfgWorld({ "/admin/config": () => [200, fx], "/admin/config/remote/rollback": () => reply });
     const h = w.$("rcHistory").innerHTML;
     const rows = h.split("<tr>").filter(x => x.includes("r"));
-    const r = [[(h.match(/rcRollback\(\)/g) || []).length === 1, "历史三行,只有一个回退按钮"],
-               [rows.some(x => x.includes("r4") && x.includes("rcRollback()") && x.includes("回到 r3")), "按钮在 r4(当前)那一行,写明回到 r3"],
-               [!w.$("cfgAudit").innerHTML.includes("cfgRollback('20')") && w.$("cfgAudit").innerHTML.includes("在「远程配置」里回退"),
+    const r = [[btnCount(h, btnSig("rcRollback")) === 1, "历史三行,只有一个回退按钮"],
+               [rows.some(x => x.includes("r4") && x.includes(btnSig("rcRollback")) && x.includes("回到 r3")), "按钮在 r4(当前)那一行,写明回到 r3"],
+               [!w.$("cfgAudit").innerHTML.includes(btnSig("cfgRollback", "20")) && w.$("cfgAudit").innerHTML.includes("在「远程配置」里回退"),
                 "配置留痕里 config.remote.publish 行没有旧的「回退到这一版」"]];
     w.st.confirm = false;
     await w.call("rcRollback");
@@ -656,7 +676,7 @@ const CFG_CASES = [
     r.push([w.$("rcHistMsg").innerHTML.includes("配置已被后来的改动更新,刷新后再试"), "409 stale → 「配置已被后来的改动更新,刷新后再试」"]);
     const fx1 = rcFixture(); fx1.remote.revision = 0; fx1.remote.history = [{ revision: 0, published_at: T0, published_by: null }];
     const w1 = await cfgWorld({ "/admin/config": () => [200, fx1] });
-    r.push([!w1.$("rcHistory").innerHTML.includes("rcRollback()") && w1.$("rcHistory").innerHTML.includes("没有更早的版本") &&
+    r.push([!w1.$("rcHistory").innerHTML.includes(btnSig("rcRollback")) && w1.$("rcHistory").innerHTML.includes("没有更早的版本") &&
             w1.$("rcHistory").innerHTML.includes("从未发布"), "只有 r0(从未发布)→ 没有回退按钮"]);
     // r1 是第一次发布:可以回退到 r0(= 全用内置,服务端认 to_revision 0)
     const fx2 = rcFixture(); fx2.remote.revision = 1; fx2.remote.history = [{ revision: 1, published_at: T0, published_by: "admin@example.com" }];
@@ -780,12 +800,105 @@ let cfgBad = 0;
 for (const [name, fn] of CFG_CASES) {
   console.log("\n══ " + name);
   let checks;
-  try { checks = await fn(); } catch (e) { checks = [[false, "用例抛错:" + e.message]]; }
+  try { checks = await fn(); } catch (e) { checks = [[false, "用例抛错:" + e.message + " @ " + String(e.stack).split("\n").slice(1,3).join(" | ")]]; }
   for (const [pass, label] of checks) {
     console.log("   " + (pass ? "PASS" : "FAIL") + "  " + label);
     if (!pass) cfgBad++;
   }
 }
 bad += cfgBad;
-console.log("\n" + (bad ? "✗ " + bad + " 条断言没过" : "✓ " + (CASES.length + CFG_CASES.length) + " 种情形全过"));
+
+// ════════════════════════════════════════════════════════════════════
+// SEC-M8(2026-10-08):会话只放 sessionStorage;CSP 不放 unsafe-inline(事件 / 样式走 data-*)
+// ════════════════════════════════════════════════════════════════════
+const SEC_CASES = [
+  ["S1) 旧版本留在 localStorage 的会话:载入即删、⛔ 不拿来用(回登录页,一发请求都没有)", async () => {
+    const r = await run("v", { legacy: LIVE });
+    return [[r.legacyLeft === 0, "localStorage 里那份已删"],
+            [r.log.length === 0, "没拿旧凭据打任何请求(含 refresh)"],
+            [r.gateShown && r.mainHidden, "回到登录页"],
+            [r.saved === null, "sessionStorage 里也没有"]];
+  }],
+  ["S2) 续期后的新 token 落在 sessionStorage,localStorage 一个字都不写", async () => {
+    const r = await run("w", { session: DEAD, serverExpired: true });
+    return [[r.saved && r.saved.refresh_token === "REFRESH_v1", "新 refresh_token 在 sessionStorage"],
+            [r.legacyLeft === 0, "localStorage 是空的"]];
+  }],
+  ["S3) 静态:页面没有内联脚本 / 内联样式块 / on*= / style= ;CSP 在、不放 unsafe-*、不放通配", async () => {
+    const r = [];
+    if (!srcRef) return [[false, "页面还是内联 <script>(没有 <script src>)"]];
+    r.push([!/<script>/.test(HTML) && !/<style>/.test(HTML), "index.html 没有 <script> / <style> 内联块"]);
+    r.push([!/\son[a-z]+\s*=/i.test(HTML), "index.html 没有 on*= 事件属性"]);
+    r.push([!/\sstyle\s*=/i.test(HTML), "index.html 没有 style= 属性"]);
+    const strs = CODE.match(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g) || [];
+    r.push([!strs.some(s => /\son[a-z]+=/i.test(s)), "admin.js 拼出来的 HTML 里没有 on*="]);
+    r.push([!strs.some(s => /\sstyle=/i.test(s)), "admin.js 拼出来的 HTML 里没有 style="]);
+    r.push([!/\b(localStorage)\.(getItem|setItem)\(/.test(CODE), "admin.js 不再读写 localStorage(只剩那句删除)"]);
+    const csp = (HTML.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/) || [])[1] || "";
+    r.push([csp.length > 0, "有 CSP meta"]);
+    r.push([!/unsafe-/.test(csp), "CSP 里没有 unsafe-inline / unsafe-eval"]);
+    r.push([/script-src 'self'(;|$)/.test(csp) && /style-src 'self'(;|$)/.test(csp), "script-src / style-src 只有 'self'"]);
+    r.push([/connect-src 'self' https:\/\/syebvkwemxwxkonvsyjd\.supabase\.co(;|$)/.test(csp) && !/\*/.test(csp), "connect-src 只放本项目 Supabase,无通配"]);
+    const refs = [...HTML.matchAll(/(?:src|href)="([^"#]+)"/g)].map(x => x[1]).filter(u => !/^https?:/.test(u));
+    r.push([refs.every(u => fs.existsSync(path.join(path.dirname(HTML_PATH), u))), "页面引用的本地文件都在(" + refs.join(", ") + ")"]);
+    const names = JSON.parse((CODE.match(/var ACTION_NAMES = (\[.*\]);/) || [, "[]"])[1]);
+    const used = new Set([...(HTML + CODE).matchAll(/data-(?:click|change|input)="([A-Za-z0-9_]+)"/g)].map(x => x[1])
+      .concat([...CODE.matchAll(/actAttr\("(?:click|change|input)", "([A-Za-z0-9_]+)"/g)].map(x => x[1])));
+    r.push([[...used].every(n => names.includes(n)), "用到的每个 data-* 动作都在名单里"]);
+    r.push([names.every(n => new RegExp("function " + n + "\\s*\\(").test(CODE)), "名单里每个名字都有同名函数"]);
+    return r;
+  }],
+  ["S4) 事件分派:名单内按 data-args 调、data-this 传元素;名单外 / 坏 JSON / 非数组都不调", async () => {
+    const listeners = {};
+    const calls = [];
+    const win = { setTimeout, clearTimeout, Promise, JSON, Math, Date, Number, String, Object, Array, isNaN, isFinite, RegExp, console: { log() {}, error() {}, warn() {} },
+      encodeURIComponent, fetch: () => new Promise(() => {}), addEventListener: () => {},
+      sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} }, localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+      location: { reload() {}, href: "https://example.com/" }, prompt: () => null, alert() {}, confirm: () => false,
+      document: { getElementById: () => makeEl("x"), querySelectorAll: () => [], addEventListener: (t, f) => { listeners[t] = f; } } };
+    win.window = win;
+    vm.createContext(win);
+    vm.runInContext(CODE, win, { filename: "admin.js" });
+    win.doAction = function (...a) { calls.push(["doAction", this && this.tag, ...a]); };
+    win.toggleHash = function (...a) { calls.push(["toggleHash", a[0] && a[0].tag]); };
+    win.cfgDirty = function (...a) { calls.push(["cfgDirty", ...a]); };
+    win.notListed = function () { calls.push(["notListed"]); };
+    const el = (tag, attrs) => ({ tag, getAttribute: k => (k in attrs ? attrs[k] : null) });
+    const fire = (type, target) => listeners[type] && listeners[type]({ target: { closest: () => target } });
+    const r = [[["click", "change", "input"].every(t => typeof listeners[t] === "function"), "document 上挂了 click / change / input 三个委托"]];
+    fire("click", el("B1", { "data-click": "doAction", "data-args": '["ban","u-1"]' }));
+    fire("click", el("C1", { "data-click": "toggleHash", "data-this": "1" }));
+    fire("input", el("I1", { "data-input": "cfgDirty", "data-args": '["cfgProv"]' }));
+    fire("click", el("X1", { "data-click": "notListed" }));
+    fire("click", el("X2", { "data-click": "doAction", "data-args": "{bad json" }));
+    fire("click", el("X3", { "data-click": "doAction", "data-args": '{"a":1}' }));
+    fire("click", null);
+    r.push([JSON.stringify(calls) === JSON.stringify([["doAction", "B1", "ban", "u-1"], ["toggleHash", "C1"], ["cfgDirty", "cfgProv"]]),
+            "只调了三次且参数对:" + JSON.stringify(calls)]);
+    // actAttr() 拼出来的属性:参数里的引号 / 尖括号被转义,解回来原样
+    const attr = win.actAttr("click", "doAction", ["set_plan", 'a"b<c>\'d']);
+    const m2 = attr.match(/data-args="([^"]*)"/);
+    const back = m2 && JSON.parse(m2[1].replace(/&quot;/g, '"').replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&amp;/g, "&"));
+    r.push([/^ data-click="doAction" data-args="/.test(attr) && !/[<>]/.test(attr) && JSON.stringify(back) === JSON.stringify(["set_plan", 'a"b<c>\'d']),
+            "actAttr() 的属性转义正确、能原样解回"]);
+    // data-style 经 CSSOM 套上
+    const kids = [{ getAttribute: () => "width:37%", style: {} }];
+    const root = { nodeType: 1, hasAttribute: () => true, getAttribute: () => "height:150px", style: {}, querySelectorAll: () => kids };
+    win.applyDataStyles(root);
+    r.push([root.style.cssText === "height:150px" && kids[0].style.cssText === "width:37%", "applyDataStyles 把 data-style 写进 style.cssText"]);
+    return r;
+  }],
+];
+let secBad = 0;
+for (const [name, fn] of SEC_CASES) {
+  console.log("\n══ " + name);
+  let checks;
+  try { checks = await fn(); } catch (e) { checks = [[false, "用例抛错:" + e.message + " @ " + String(e.stack).split("\n").slice(1,3).join(" | ")]]; }
+  for (const [pass, label] of checks) {
+    console.log("   " + (pass ? "PASS" : "FAIL") + "  " + label);
+    if (!pass) secBad++;
+  }
+}
+bad += secBad;
+console.log("\n" + (bad ? "✗ " + bad + " 条断言没过" : "✓ " + (CASES.length + CFG_CASES.length + SEC_CASES.length) + " 种情形全过"));
 process.exit(bad ? 1 : 0);
