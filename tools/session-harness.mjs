@@ -4,11 +4,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
+import { fileURLToPath } from "node:url";
 import { createFake } from "./beta-phases-fake.mjs";
 
 // SEC-M8(2026-10-08):脚本搬进了 admin.js(CSP 不放 unsafe-inline)。页面引用了外链脚本就读那份;
 //   还是内联的旧页面照旧抽 <script> 块。
-const HTML_PATH = process.argv[2] || "index.html";
+// 默认读本仓的 index.html(按脚本位置算,不写死本机路径 —— 这是公开仓)
+const HTML_PATH = process.argv[2] || path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "index.html");
 const HTML = fs.readFileSync(HTML_PATH, "utf8");
 const srcRef = HTML.match(/<script src="([^"]+)"><\/script>/);
 const m = srcRef ? null : HTML.match(/<script>\n([\s\S]*?)\n<\/script>/);
