@@ -1,13 +1,13 @@
 // 开放阶段(内测 → 公测)的本地假服务 —— 服务端动作还没上线,先按契约把后台页的读改流程跑通。
 //
 // 契约来源:murmur-all docs/DESIGN-beta-phases.md v0.2「接口契约」(动作名)+ 服务端施工路线 S4(cohort_quotas_set、
-// 字段名)。回包形状契约没写死,这里和 index.html 里 phNorm 上方那段注释是**同一份假定**,服务端定稿后两边一起对齐。
+// 字段名)。回包形状契约没写死,这里和 admin.js 里 phNorm 上方那段注释是**同一份假定**,服务端定稿后两边一起对齐。
 //
 // 两种用法:
 //   1) import { createFake } —— 哨兵(session-harness.mjs)和截图脚本直接调 route(),不起端口;
 //   2) node tools/beta-phases-fake.mjs [端口] [closed|public]
-//        → 在 127.0.0.1 上起一个页面 + 假 API:index.html 原样读进来,只在**内存里**把 HOST 换成本机、
-//          塞一份假会话(假 token,不是 JWT),文件本身不动。
+//        → 在 127.0.0.1 上起一个页面 + 假 API:index.html / admin.js / admin.css 原样读进来,只在**内存里**把 admin.js 的 HOST
+//          换成本机、由同源 /fake-session.js 塞一份假会话(假 token,不是 JWT),文件本身不动、CSP 不动。
 //
 // ⛔ 公开仓:夹具只用 example.com 邮箱和假计数;不写任何真邮箱、真 token、真项目 id 以外的东西。
 import http from "node:http";
@@ -229,15 +229,26 @@ export function createFake(scene = "closed") {
 // ── 页面 + 假 API 的本机服务(只听 127.0.0.1)────────────────────────────
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export function servePage(fake, port = 0, htmlPath = path.join(HERE, "..", "index.html")) {
+  // SEC-M8 之后脚本在 admin.js、样式在 admin.css,页面 CSP 是 script-src 'self'(不放 unsafe-inline):
+  //   HOST 只在内存里换进 admin.js;假会话也不能再用内联 <script> 塞(会被 CSP 挡),改由同源的 /fake-session.js
+  //   在 admin.js 之前写进 sessionStorage。index.html 的 CSP 一个字不动 —— 冒烟跑的就是线上那条 CSP。
+  const dir = path.dirname(htmlPath);
   const page = () => {
-    let h = fs.readFileSync(htmlPath, "utf8");
-    const before = h;
-    h = h.replace(/var HOST = "https:\/\/[^"]+";/, "var HOST = location.origin;");
-    if (h === before) throw new Error("index.html 里没找到 var HOST = … 那一行");
+    const h = fs.readFileSync(htmlPath, "utf8");
+    const out = h.replace('<script src="admin.js"></script>', '<script src="fake-session.js"></script>\n<script src="admin.js"></script>');
+    if (out === h) throw new Error("index.html 里没找到 <script src=\"admin.js\"> 那一行");
+    return out;
+  };
+  const js = () => {
+    const a = fs.readFileSync(path.join(dir, "admin.js"), "utf8");
+    const out = a.replace(/var HOST = "https:\/\/[^"]+";/, "var HOST = location.origin;");
+    if (out === a) throw new Error("admin.js 里没找到 var HOST = … 那一行");
+    return out;
+  };
+  const sessJs = () => {
     const sess = { access_token: "fake-access", refresh_token: "fake-refresh", token_type: "bearer",
                    expires_at: Math.floor(Date.now() / 1000) + 3600 };
-    return h.replace("<script>\n\"use strict\";",
-      "<script>try { localStorage.setItem(\"murmur.admin.session\", " + JSON.stringify(JSON.stringify(sess)) + "); } catch (e) {}</script>\n<script>\n\"use strict\";");
+    return "try { sessionStorage.setItem(\"murmur.admin.session\", " + JSON.stringify(JSON.stringify(sess)) + "); } catch (e) {}\n";
   };
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, "http://127.0.0.1");
@@ -246,6 +257,9 @@ export function servePage(fake, port = 0, htmlPath = path.join(HERE, "..", "inde
       res.end(typeof obj === "string" ? obj : JSON.stringify(obj));
     };
     if (req.method === "GET" && (u.pathname === "/" || u.pathname === "/index.html")) return send(200, page(), "text/html; charset=utf-8");
+    if (req.method === "GET" && u.pathname === "/admin.js") return send(200, js(), "text/javascript; charset=utf-8");
+    if (req.method === "GET" && u.pathname === "/fake-session.js") return send(200, sessJs(), "text/javascript; charset=utf-8");
+    if (req.method === "GET" && u.pathname === "/admin.css") return send(200, fs.readFileSync(path.join(dir, "admin.css"), "utf8"), "text/css; charset=utf-8");
     let raw = "";
     req.on("data", (c) => { raw += c; });
     req.on("end", () => {
